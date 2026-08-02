@@ -29,7 +29,7 @@ english_web_app/                                    # ROOT MONOREPO REPOSITORY
         │   │   ├── IeltsPlatformApplication.java   # Spring Boot Entrypoint (@SpringBootApplication)
         │   │   │
         │   │   ├── common/                         # SHARED KERNEL (Hạ tầng kỹ thuật chung)
-        │   │   │   ├── base/                       # AuditableEntity (id, createdAt, updatedAt, version)
+        │   │   │   ├── base/                       # BaseEntity (Base Entity metadata: id, createdAt, updatedAt — TẤT CẢ Entity đều kế thừa)
         │   │   │   ├── config/                     # SecurityConfig, RedisConfig, OpenApiConfig, JpaAuditConfig
         │   │   │   ├── event/                      # DomainEventPublisher (Truyền tin liên module)
         │   │   │   ├── exception/                  # GlobalExceptionHandler (Hứng & chuẩn hóa lỗi HTTP)

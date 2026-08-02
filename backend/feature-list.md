@@ -54,13 +54,13 @@ Scope: requirements + architecture + tech stack mapping only. No code. Stack anc
 [Next.js Frontend] --HTTPS/REST/JSON--> [Spring Boot API Gateway/Monolith]  
                                           |-- Auth Module (Spring Security + JWT/OAuth2)  
                                           |-- User/Profile Module  
-                                          |-- Mock Test Module (Listening/Reading/Writing/Speaking)  
+                                          |-- IELTS Mock Test Module (Listening/Reading/Writing/Speaking)  
+                                          |-- Skill Practice & Training Module (Dictation, Speaking Drills, Writing Drills, Reading Drills, Grammar Quizzes)  
+                                          |-- CEFR Reference Library & Knowledge Base (Grammar, Vocabulary, Tips & Tricks)  
                                           |-- Flashcard/Vocabulary Module  
                                           |-- Essay Bank Module  
                                           |-- Writing Check Module (calls LLM API)  
                                           |-- Speaking Room Module (calls STT + LLM API)  
-                                          |-- Dictation Module  
-                                          |-- Knowledge Base (CEFR content) Module  
                                           |-- Ads/Subscription Module  
                                           |-- Search Module (keyword + semantic via pgvector)  
                                           |  
@@ -117,26 +117,26 @@ Each requirement is atomic: one testable statement. Grouped by feature area.
 * **FR-2.5:** Free-tier users are capped on daily mock-test attempts; paid users are unlimited.  
   * *Tech:* Redis daily counter keyed by `userId:date`.
 
-### **3.3 Mock Tests — 4 Skills (Listening, Reading, Writing, Speaking)**
+### **3.3 IELTS Mock Tests — 4 Skills (Official Exam Simulation Mode)**
 
 **General**
 
-* **FR-3.1:** User can select a full mock test (all 4 skills) or an individual skill practice.  
-* **FR-3.2:** System records start time, end time, and per-part timing for each attempt.  
+* **FR-3.1:** User can select a full mock test (all 4 skills) or an individual skill mock test attempt.  
+* **FR-3.2:** System records start time, end time, and per-part timing for each mock attempt.  
 * **FR-3.3:** User can pause and resume a test session within a time limit (or disallow pausing for exam-simulation mode — configurable).  
 * **FR-3.4:** System auto-submits the test when the official time limit expires.  
 * **FR-3.5:** User receives a band score breakdown (listening/reading exact scores, speaking/writing estimated band scores) after submission.  
 * **FR-3.6:** User can review a completed test with correct answers and explanations.  
   * *Tech (all above):* `test_attempts`, `test_answers` tables; Spring Boot `TestSessionController`; timer logic client-side (React) with server-side authoritative re-validation on submit.
 
-**Listening**
+**Listening (Mock Test)**
 
-* **FR-3.7:** User can play an audio clip once (or per IELTS-rules constraints) per section.  
+* **FR-3.7:** User can play an audio clip once (per official IELTS constraints) per section.  
   * *Tech:* `<audio>` element streaming from S3/CDN signed URL; Next.js audio player component.  
 * **FR-3.8:** System scores listening answers automatically (multiple choice, fill-in-blank, matching).  
   * *Tech:* Rule-based exact/fuzzy string match in Spring Boot for fill-in-blank (Levenshtein distance tolerance for minor typos).
 
-**Reading**
+**Reading (Mock Test)**
 
 * **FR-3.9:** User can view a reading passage alongside its questions (split-screen).  
   * *Tech:* Next.js two-pane layout component.  
@@ -145,7 +145,7 @@ Each requirement is atomic: one testable statement. Grouped by feature area.
 * **FR-3.11:** User can highlight/note/delete highlight passage text during the test (non-scored, UX aid).  
   * *Tech:* Client-side only (React state), not persisted unless requested.
 
-**Writing (Task 1 & Task 2)**
+**Writing (Mock Test — Task 1 & Task 2)**
 
 * **FR-3.12:** User can view a Task 1 prompt (chart/graph/diagram/letter) and Task 2 prompt (essay).  
   * *Tech:* Prompt images stored in S3, served via Next.js `<Image>`.  
@@ -154,7 +154,7 @@ Each requirement is atomic: one testable statement. Grouped by feature area.
 * **FR-3.14:** User's essay is submitted to the Writing Check module for scoring (see Section 3.6).  
 * **FR-3.15:** User can see time remaining and word-count warnings (under/over IELTS thresholds).
 
-**Speaking**
+**Speaking (Mock Test)**
 
 * **FR-3.16:** User can complete simulated Part 1/2/3 speaking test with recorded responses.  
   * *Tech:* Browser `MediaRecorder` API (React) -> upload audio blob to S3 via Spring Boot presigned URL.  
@@ -203,7 +203,7 @@ Each requirement is atomic: one testable statement. Grouped by feature area.
 * **FR-6.5:** User can view essay-scoring history and track band-score trend over time.  
   * *Tech (3.6 overall):* Spring Boot `WritingCheckService` calls an LLM (Claude Sonnet recommended for quality on nuanced scoring) with a structured prompt requesting JSON output (criteria scores + spans + suggestions); response persisted in `essay_submissions` + `essay_feedback` tables; optionally supplement with a dedicated grammar-checking library (LanguageTool, self-hostable Java-based grammar checker) for fast, deterministic grammar flags alongside the LLM's holistic scoring.
 
-### **3.7 Dictations for All Levels**
+### **3.7 Dictation Exercises (Skill Practice Module)**
 
 * **FR-7.1:** User can select a dictation exercise by CEFR level (A1–C2) or IELTS band-equivalent.  
 * **FR-7.2:** User listens to an audio clip and types what they hear.  
@@ -214,10 +214,10 @@ Each requirement is atomic: one testable statement. Grouped by feature area.
   * *Tech:* `<audio playbackRate>` control in React.  
 * **FR-7.6:** System shows a word-by-word correction view after submission.
 
-### **3.8 Speaking Practice Room**
+### **3.8 Speaking Practice Room & Shadowing (Skill Practice Module)**
 
-* **FR-8.1:** User can start a speaking session and receive an AI-generated or bank-sourced question (Part 1/2/3 style).  
-* **FR-8.2:** User records an audio response via microphone.  
+* **FR-8.1:** User can start a speaking session and receive an AI-generated or bank-sourced question (Part 1/2/3 style) or topic drill.  
+* **FR-8.2:** User records an audio response via microphone or practices sentence shadowing against official audio models.  
 * **FR-8.3:** System transcribes the audio to text.  
   * *Tech:* STT service (Whisper self-hosted for cost control, or cloud STT for reliability).  
 * **FR-8.4:** System scores the response against IELTS speaking criteria: Fluency & Coherence, Lexical Resource, Grammatical Range & Accuracy, Pronunciation.  
@@ -227,41 +227,65 @@ Each requirement is atomic: one testable statement. Grouped by feature area.
 * **FR-8.6:** User can play back their own recording alongside the transcript.  
 * **FR-8.7:** User can view historical speaking session scores and recordings (subject to storage retention policy).
 
-### **3.9 Reading Knowledge Base (Level-Based Learning Content)**
+### **3.9 CEFR Reference Library & Knowledge Base (A1–C2 Levels)**
 
-* **FR-9.1:** User can browse learning content organized by CEFR level (A1–C2).  
-* **FR-9.2:** Each level page lists expected grammar points, vocabulary themes, and skills for that level.  
-* **FR-9.3:** User can mark a knowledge-base article/topic as "completed."  
+* **FR-9.1:** User can browse a comprehensive learning reference library organized by CEFR level (A1–C2) and topic category (Grammar Rules, Topic Vocabulary Lists, Exam Tips & Tricks, Skill Strategies).  
+* **FR-9.2:** Each level section displays expected grammar structures (e.g. Present Perfect at B1, Inversion at C1), topic word lists with definitions/examples, and tactical exam tips.  
+* **FR-9.3:** User can mark a knowledge-base article or topic as "completed" to track learning progress.  
 * **FR-9.4:** System recommends next-level content once a user completes prerequisites or hits a mock-test band threshold.  
-  * *Tech:* `knowledge_base_articles` table with level tags; `user_progress` table; simple rule engine in Spring Boot (if band >= X and articles-complete >= Y -> unlock next level UI badge).  
-* **FR-9.5:** User can search knowledge-base content semantically (e.g., "how do I use present perfect" surfaces the right article even without exact keyword match).  
+  * *Tech:* `knowledge_base_articles` table with level & category tags; `user_progress` table; rule engine in Spring Boot (if band >= X and articles-complete >= Y -> unlock next level UI badge).  
+* **FR-9.5:** User can search knowledge-base articles semantically across grammar, vocabulary, and tips (e.g., "how to describe pie charts" or "when to use past perfect" surfaces the exact reference article).  
   * *Tech:* pgvector semantic search — see Section 5.
 
-### **3.10 Multilanguage Support**
+### **3.10 Writing Practice & Drills (Skill Practice Module)**
 
-* **FR-10.1:** User can switch the site UI language (e.g., English, Vietnamese, Spanish, etc.) from a persistent selector.  
+* **FR-10.1:** User can select standalone, untimed writing drills including sentence building, paragraph structure practice, Task 1 chart description drills, and common grammar error spotters.  
+* **FR-10.2:** User receives real-time AI feedback on isolated paragraphs or Task 1 chart descriptions without having to complete a full 60-minute essay test.  
+* **FR-10.3:** System provides template sentence structures (e.g. "Comparing data over time", "Expressing opinion") for instant practice.  
+* **FR-10.4:** User can compare their drafted paragraph against high-band (Band 8+) reference model paragraphs.  
+* **FR-10.5:** User can save key phrases generated in writing drills directly to their flashcard deck.
+
+### **3.11 Reading Speed & Isolated Question Drills (Skill Practice Module)**
+
+* **FR-11.1:** User can practice isolated question types (e.g. practicing *only* "Matching Headings", *only* "True/False/Not Given", or *only* "Summary Completion") without taking a full passage exam.  
+* **FR-11.2:** User can engage in speed-reading drills with guided visual timers to improve reading words-per-minute (WPM) speed.  
+* **FR-11.3:** System provides immediate answer explanations and text-span evidence highlighting directly after each question attempt.  
+* **FR-11.4:** User can track accuracy percentages per question type to identify personal weak spots (e.g., 85% on MCQ, 45% on T/F/NG).  
+* **FR-11.5:** User can highlight unknown words in reading drill passages and add them directly to their flashcard deck.
+
+### **3.12 Grammar & Vocabulary Exercises (Skill Practice Module)**
+
+* **FR-12.1:** User can complete interactive, level-based grammar and vocabulary quizzes (fill-in-the-blank, error identification, collocation matching).  
+* **FR-12.2:** Quizzes are organized by CEFR levels (A1–C2) and tagged to matching articles in the CEFR Reference Library (Section 3.9).  
+* **FR-12.3:** System provides immediate rule explanations for incorrect answers, linking back to the relevant Grammar Reference Library guide.  
+* **FR-12.4:** System tracks user mastery score per grammar topic (e.g., Conditionals 90%, Relative Clauses 60%).  
+* **FR-12.5:** User can add failed vocabulary quiz words directly into their personal flashcard review deck.
+
+### **3.13 Multilanguage Support**
+
+* **FR-13.1:** User can switch the site UI language (e.g., English, Vietnamese, Spanish, etc.) from a persistent selector.  
   * *Tech:* `next-intl` with locale routing (`/en/...`, `/vi/...`); translation JSON files per locale.  
-* **FR-10.2:** System remembers the user's language preference across sessions.  
+* **FR-13.2:** System remembers the user's language preference across sessions.  
   * *Tech:* Stored in `users.locale` column + cookie fallback for anonymous users.  
-* **FR-10.3:** Backend error messages and emails are localized based on user's stored locale.  
+* **FR-13.3:** Backend error messages and emails are localized based on user's stored locale.  
   * *Tech:* Spring `MessageSource` with locale-specific `.properties` bundles.  
-* **FR-10.4:** Core learning content (IELTS materials) remains in English by design; only UI chrome, instructions, and navigation are translated.
+* **FR-13.4:** Core learning content (IELTS materials) remains in English by design; only UI chrome, instructions, and navigation are translated.
 
-### **3.11 Landing Page (Marketing)**
+### **3.14 Landing Page (Marketing)**
 
-* **FR-11.1:** Landing page displays value proposition, feature highlights, and pricing tiers to unauthenticated visitors.  
-* **FR-11.2:** Landing page includes a signup call-to-action above the fold.  
-* **FR-11.3:** Landing page includes social proof (testimonials, band-score improvement stats).  
-* **FR-11.4:** Landing page is fully server-rendered/static for SEO.  
+* **FR-14.1:** Landing page displays value proposition, feature highlights, and pricing tiers to unauthenticated visitors.  
+* **FR-14.2:** Landing page includes a signup call-to-action above the fold.  
+* **FR-14.3:** Landing page includes social proof (testimonials, band-score improvement stats).  
+* **FR-14.4:** Landing page is fully server-rendered/static for SEO.  
   * *Tech:* Next.js Static Site Generation (SSG) or ISR for the marketing route group; separate from the authenticated app shell.  
-* **FR-11.5:** Landing page tracks conversion analytics (signup funnel).  
+* **FR-14.5:** Landing page tracks conversion analytics (signup funnel).  
   * *Tech:* Analytics tool (PostHog, Plausible, or GA4) event tracking.
 
-### **3.12 Semantic Search (Cross-Cutting)**
+### **3.15 Semantic Search (Cross-Cutting)**
 
-* **FR-12.1:** User can search across reading passages, sample essays, knowledge-base articles, and flashcards using natural-language queries that match by meaning, not just keyword.  
-* **FR-12.2:** Search results are ranked by relevance combining semantic similarity and keyword match (hybrid search).  
-* **FR-12.3:** New content (essays, passages, articles) is automatically embedded and indexed on creation/update (covered in detail in Section 5).
+* **FR-15.1:** User can search across reading passages, sample essays, knowledge-base articles, and flashcards using natural-language queries that match by meaning, not just keyword.  
+* **FR-15.2:** Search results are ranked by relevance combining semantic similarity and keyword match (hybrid search).  
+* **FR-15.3:** New content (essays, passages, articles) is automatically embedded and indexed on creation/update (covered in detail in Section 5).
 
 ---
 
@@ -332,11 +356,11 @@ Each requirement is atomic: one testable statement. Grouped by feature area.
 Concrete places to store and query embeddings:
 
 1. **Sample essay library search (FR-4.2):** Embed each essay's full text (or a summary) once on upload; store vector in `sample_essays.embedding`. Query: embed the user's search phrase, run cosine-similarity `ORDER BY embedding <=> :query_vector LIMIT n`.  
-2. **Reading passage / knowledge-base semantic search (FR-9.5, FR-12.1):** Same pattern — embed article/passage chunks (split long articles into ~300-500 token chunks for better retrieval granularity), store in a `content_embeddings` table with a foreign key to the source content type + id.  
+2. **Reading passage / knowledge-base semantic search (FR-9.5, FR-15.1):** Same pattern — embed article/passage chunks (split long articles into ~300-500 token chunks for better retrieval granularity), store in a `content_embeddings` table with a foreign key to the source content type + id.  
 3. **Flashcard duplicate detection (FR-5.2):** Primarily solved via lemma/string normalization, but embeddings can catch near-duplicate phrases with different wording (e.g., "make a decision" vs "decide") if you want fuzzy duplicate detection beyond exact lemma match.  
 4. **Word/phrase definition retrieval cache (FR-5.8):** Optional — embed word+context to detect "have we already generated a definition for a word used in a similar context" before calling the LLM again, saving cost.  
 5. **Speaking/Writing feedback retrieval-augmented examples:** When generating improvement suggestions, you can retrieve similar high-band sample sentences via embedding similarity to show the user a concrete "here's how a band-8 response phrased this" example.  
-6. **Hybrid search ranking (FR-12.2):** Combine Postgres full-text search (`ts_rank`) with vector similarity score in a weighted formula, or do candidate retrieval via `tsvector` and re-rank the top-N by embedding similarity (cheaper than pure vector search over the whole corpus).
+6. **Hybrid search ranking (FR-15.2):** Combine Postgres full-text search (`ts_rank`) with vector similarity score in a weighted formula, or do candidate retrieval via `tsvector` and re-rank the top-N by embedding similarity (cheaper than pure vector search over the whole corpus).
 
 **Embedding model choice:** Use a hosted embedding API (e.g., OpenAI `text-embedding-3-small/large`, or Voyage AI embeddings which are commonly paired with Anthropic-based pipelines) called from the Spring Boot backend at content-creation time; store the resulting float array in a pgvector column (dimension must match the model, e.g., 1536 or 1024).
 
@@ -411,7 +435,9 @@ Concrete places to store and query embeddings:
 * `flashcard_reviews` (extends `BaseEntity`): `flashcard_id`, `next_review_at`, `ease_factor`, `interval_days`, `last_reviewed_at`  
 * `dictation_items` (extends `BaseEntity`): `level`, `audio_url`, `transcript`  
 * `speaking_sessions` (extends `BaseEntity`): `user_id`, `question_id`, `audio_url`, `transcript`, `feedback_json`  
-* `knowledge_base_articles` (extends `BaseEntity`): `level`, `title`, `content`, `embedding`  
+* `knowledge_base_articles` (extends `BaseEntity`): `level`, `category` (GRAMMAR, VOCABULARY, TIPS_TRICKS, SKILLS), `title`, `content`, `embedding`  
+* `practice_exercises` (extends `BaseEntity`): `module_type` (DICTATION, SPEAKING, WRITING, READING, GRAMMAR), `skill`, `cefr_level`, `title`, `content_json`  
+* `practice_attempts` (extends `BaseEntity`): `user_id`, `exercise_id`, `user_answer`, `feedback_json`, `score`  
 * `user_progress` (extends `BaseEntity`): `user_id`, `article_id_or_level`, `completed_at`  
 * `content_embeddings` (extends `BaseEntity`): `content_type`, `content_id`, `embedding` — optional generic table if separate from content tables  
 * `subscriptions` (extends `BaseEntity`): `user_id`, `stripe_customer_id`, `status`, `current_period_end`
@@ -421,12 +447,13 @@ Concrete places to store and query embeddings:
 ## **10. Suggested Build Order (Planning-Level Only)**
 
 1. Auth + user accounts + landing page (foundation, needed by everything else).  
-2. Knowledge base + reading passages (simplest content-serving features, validates content pipeline).  
+2. CEFR Reference Library + Knowledge Base (simplest content-serving features, validates content pipeline).  
 3. Flashcard module (cross-cutting, needed early since other features feed into it).  
-4. Reading + Listening mock tests (rule-based scoring, no AI dependency yet).  
-5. Semantic search (once you have enough content rows to make it meaningful).  
-6. Writing check (introduces LLM dependency + cost controls).  
-7. Dictation (reuses audio pipeline from listening).  
-8. Speaking practice room (most complex: recording, STT, LLM scoring, conversational loop).  
-9. Ads + subscription/payment gating.  
-10. Multilanguage UI pass.
+4. Skill Practice Module — Reading & Dictation Drills (interactive exercises, rule-based).  
+5. Reading + Listening mock tests (rule-based scoring, exam simulation).  
+6. Semantic search (once content rows exist across library & passages).  
+7. Skill Practice Module — Writing Drills & AI Writing Check (introduces LLM evaluation).  
+8. Skill Practice Module — Speaking Drills & Practice Room (most complex: recording, STT, LLM scoring, conversational loop).  
+9. Skill Practice Module — Grammar & Vocabulary interactive quizzes.  
+10. Ads + subscription/payment gating.  
+11. Multilanguage UI pass.

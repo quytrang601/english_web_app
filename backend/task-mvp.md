@@ -289,23 +289,23 @@ backend/
 #### **Person B**
 
 * **High-Level Task Overview:**
-  * **Core Scope:** Set up local Docker containerization (`Dockerfile` and `docker-compose.yml` for PostgreSQL 17 & Redis 7). Build the `content` module to serve IELTS reading passages filterable by CEFR level (`GET /api/content/passages`) using `ReadingPassage` (implementing `VectorIndexable`) and `ContentMapper`. Integrate event publishing (`ContentCreatedEvent`) in `ContentServiceImpl` to trigger `IEmbeddingIndexer` vector indexing, and enable vocabulary selection via `IFlashcardService.addWord()` using `SourceTag.READING_PASSAGE` and `word_definitions` cache table lookup. Seed initial reading passage test data (~10 real passages across levels).
-  * **Key Goal:** Provide a working local Docker environment, browsable reading content by level with vector indexing event triggers, and flashcard extraction integration.
+  * **Core Scope:** Set up local Docker containerization (`Dockerfile` and `docker-compose.yml` for PostgreSQL 17 & Redis 7). Build the `content` module to serve IELTS reading passages filterable by CEFR level (`GET /api/content/passages`) using `ReadingPassage` and `ContentMapper`. Seed initial reading passage test data (~10 real passages across levels).
+  * **Key Goal:** Provide a working local Docker environment, and a browsable reading content API by level. `VectorIndexable`, vector search integration, and flashcard extraction will be wired in Week 2 once Person A has built the required infrastructure (`IEmbeddingIndexer`, `PgVectorEmbeddingIndexerImpl`).
 
 | File | What to do |
 | ----- | ----- |
 | `Dockerfile` | Multi-stage Docker build file for Spring Boot Java 21 app (builder stage + slim JDK runtime stage). |
 | `docker-compose.yml` | Multi-container compose configuration defining `postgres` (PostgreSQL 17 on port 5432) and `redis` (Redis 7 on port 6379) with healthchecks and persistent data volumes. |
-| `modules/content/entities/ReadingPassage.java` | Extends `BaseEntity`, implements `VectorIndexable`. Fields: `title, body (Text), level (String, e.g., "B1"), topic, wordCount`. Implements `getEmbeddableText()` for vector search indexing. Reusable for full `TestAttempt` and isolated Reading `PracticeAttempt` drills. |
+| `modules/content/entities/ReadingPassage.java` | Extends `BaseEntity`. Fields: `title, body (Text), level (String, e.g., "B1"), topic, wordCount`. Leave `VectorIndexable` implementation for Week 2 — Person A's `IEmbeddingIndexer` does not exist yet. |
 | `modules/content/repository/ReadingPassageRepository.java` | `extends JpaRepository<ReadingPassage, UUID>` + `List<ReadingPassage> findByLevel(String level)`. |
 | `modules/content/dtos/response/ReadingPassageResponse.java` | `id, title, body, level, topic`. |
 | `modules/content/mapper/ContentMapper.java` | Reusable mapper converting `ReadingPassage` entity to `ReadingPassageResponse` DTO (`toResponse(ReadingPassage entity)`). |
 | `modules/content/ports/IContentService.java` | `List<ReadingPassageResponse> getPassages(String level)`, `ReadingPassageResponse getPassageById(UUID id)`. |
-| `modules/content/services/impl/ContentServiceImpl.java` | Implements `IContentService` using `ContentMapper`. Throw `DomainException` (404) if `id` not found. Upon saving a new passage, fires `ApplicationEventPublisher.publishEvent(new ContentCreatedEvent(passage))` to trigger `IEmbeddingIndexer` pgvector indexing. Enables word selection for flashcards via `IFlashcardService.addWord()` using `SourceTag.READING_PASSAGE` and `word_definitions` cache table lookup. |
-| `modules/content/controllers/ContentController.java` | `GET /api/content/passages?level=`, `GET /api/content/passages/{id}`, `POST /api/content/passages/{id}/flashcard` (extracts word with `SourceTag.READING_PASSAGE` & `word_definitions` cache lookup). |
-| `(seed data)` | A `data.sql` or a small `CommandLineRunner` bean that inserts ~10 real reading passages across levels and publishes `ContentCreatedEvent` for vector indexing test data in Week 2. |
+| `modules/content/services/impl/ContentServiceImpl.java` | Implements `IContentService` using `ContentMapper`. Throw `DomainException` (404) if `id` not found. No event publishing yet — that is added in Week 2 after Person A delivers `IEmbeddingIndexer`. |
+| `modules/content/controllers/ContentController.java` | `GET /api/content/passages?level=`, `GET /api/content/passages/{id}`. No flashcard endpoint yet — `IFlashcardService` is not built until Week 2. |
+| `(seed data)` | A `data.sql` or a small `CommandLineRunner` bean that inserts ~10 real reading passages across levels (A1, B1, B2, C1) as test data. |
 
-**Deliverable:** Local Docker environment running Postgres & Redis; Signup/login/refresh/logout working via Swagger; reading passages seeded, vector-indexable via `ContentCreatedEvent`, and flashcard-extractable by level.
+**Deliverable:** Local Docker environment running Postgres & Redis; reading passages seeded and retrievable by level via Swagger. Vector search, flashcard extraction, and event publishing are wired in Week 2 after Person A delivers the required infrastructure.
 
 ---
 

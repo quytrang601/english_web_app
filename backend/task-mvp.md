@@ -1,493 +1,810 @@
-# **IELTS Platform — Backend-Only MVP Plan (4 Weeks)**
+# 🚀 IELTS Platform — 12-Week Deep Technical MVP Roadmap
 
-Frontend is explicitly out of scope for these 4 weeks — both people build it together later. This plan covers backend only: architecture, full folder structure, component reusability guidelines, and a file-by-file task guide.
-
-## **Team & Split**
-
-* **Person A:** Auth, User, Dictation, Listening + all shared infrastructure (Security, Google Gemini LLM, Cartesia TTS, Deepgram STT, S3 storage clients), vector indexing pipeline, and production security hardening.
-* **Person B** *(new to SWE)*: Docker environment setup, Content (Reading Passages), Assessment Engine, Writing AI scoring framework, Speaking audio pipeline, and Flashcards (SM-2 spaced repetition). Mostly CRUD by design; the genuinely harder spots are flagged with 🔶 below, and Person A is free to pair on those from Week 3 onward.
+> **Engineering Team:**  
+> • **Person A (Fresher):** Platform Infrastructure, Auth/User, Assessment Engine (Exam Timer & Scoring), AI Writing Evaluation, and Frontend Exam/Writing UI.  
+> • **Person B (Intern):** Docker Containerization, Reading Content Management, Flashcards (SM-2 Spaced Repetition), Dictation Engine, and Frontend Practice UI.  
+>  
+> **Cadence:** **Weeks 1–9:** Backend Modular Monolith (Spring Boot 3.4.4, Java 21 LTS, PostgreSQL 17, Redis 7).  
+> **Weeks 10–12:** Frontend Client (Next.js 16, React 19, TypeScript, Tailwind CSS, shadcn/ui).  
+>  
+> **Core Principle:** **100% Vertical Feature Ownership.** Each person owns their features from database schema, repository, domain logic, and REST controllers to automated tests and frontend UI. There are **NO mixed tables** and **NO horizontal handoff bottlenecks**.
 
 ---
 
-## **1. Folder Structure, Base Entity & Reusability Mandates**
+## 🏛️ Architectural Standards & Vertical Package Isolation
 
-### **7-Folder Module Architecture**
-Every module (both people's) follows the same 7-folder shape:
+Every backend feature module lives in its own package under `com.ieltsplatform.modules.<feature_name>` and follows the strict 7-folder vertical layout:
 
 ```text
-modules/<module_name>/
-├── entities/          # JPA @Entity classes — ALL entities extend BaseEntity (Base Entity for metadata)
-├── repository/        # Spring Data JPA interfaces — extends JpaRepository<Entity, Id>
-├── dtos/              # Data transfer objects
-│   ├── request/       # What the client sends
-│   └── response/      # What you send back — never the entity directly
-├── mapper/            # entity <-> DTO conversion, static helper methods
-├── ports/             # Interfaces only — the service contract (e.g., IFlashcardService)
-├── services/impl/     # The concrete implementation of each port (e.g., FlashcardServiceImpl)
-└── controllers/       # REST endpoints — depend on the port interface, never the impl class
-```
-
-**Base Entity Mandate:** Every `@Entity` class across all modules MUST extend `com.ieltsplatform.common.base.BaseEntity`. This ensures consistent metadata tracking (`id` UUID, `createdAt` Instant, `updatedAt` Instant) across the entire application without duplicating standard metadata columns.
-
-**Why `ports/` is separate from `services/impl/`:** the controller only ever imports the interface (`IFlashcardService`), never the concrete class (`FlashcardServiceImpl`). Spring wires the real implementation in at runtime. This is Dependency Inversion — you can swap or mock an implementation without ever touching the controller.
-
----
-
-### **6 Component Reusability & Extensibility Design Patterns**
-
-To ensure MVP components directly power post-MVP features (Dictation Drills, Reading Speed Drills, CEFR Reference Library, Grammar Quizzes) without code duplication or major refactoring, all backend components MUST adhere to these 6 core design patterns:
-
-1. **🎧 Audio Media & TTS Synthesis Reuse (`AudioContent`)**:
-   - **Embeddable Contract**: Encapsulate audio properties in an `@Embeddable` class `common/base/AudioContent.java` (`audioUrl`, `transcript`, `duration`, `cefrLevel`).
-   - **Entity Composition**: Embedded directly using `@Embedded` in `ListeningSection`, `DictationItem`, `SpeakingSession`, and post-MVP `ListeningDrill`.
-   - **Pipeline Adapter Contract**: Shared ports `ITtsClient` (Cartesia Sonic 3.5 API) and `IStorageClient` (AWS S3) work in tandem:
-     1. `ITtsClient.synthesize(script, voiceId)` generates raw PCM/MP3 audio bytes + duration.
-     2. `IStorageClient.upload(key, bytes, contentType)` persists audio to S3.
-     3. Public URL and duration are stored into `AudioContent`.
-   - **Reusability**: Listening Mock Tests, Dictation Exercises, Isolated Listening Drills, and Speaking Voice Prompts reuse the exact same audio generation and storage pipeline.
-
-2. **🎯 Generic Answer Scoring Engine (`IAnswerScorer`)**:
-   - **Strategy Pattern Contract**: Define `IAnswerScorer` interface in `common/ports/IAnswerScorer.java` (`ScoreResult score(Question question, String userAnswer)` and `QuestionType getSupportedType()`).
-   - **Concrete Strategies**: Implemented as stateless Spring `@Component` beans in `common/services/impl/`:
-     - `McqScorerImpl`: Exact option key match + distractor analysis.
-     - `TfNgScorerImpl`: Case-insensitive normalization (`TRUE`, `FALSE`, `NOT_GIVEN`).
-     - `FillBlankScorerImpl`: Case-insensitive, typo-tolerant Levenshtein distance match (<= 1 edit distance allowed for minor spelling errors).
-   - **Strategy Registry**: `AnswerScorerRegistry` in `common/services/impl/` injects `Map<QuestionType, IAnswerScorer>` for dynamic strategy lookup.
-   - **Zero-Duplication Drill Reuse**: Full `TestAttempt` (mock exams) and lightweight `PracticeAttempt` (isolated Reading Drills, Dictation Exercises, Grammar Quizzes) execute the exact same scoring strategy classes and registry, guaranteeing ZERO code duplication.
-
-3. **🤖 Structured AI Evaluation Pipeline (`LlmPromptTemplate`)**:
-   - **Template Contract**: Decouple raw LLM client calls (`ILlmClient`) from domain prompt formatting via `common/prompt/LlmPromptTemplate.java`:
-     - Encapsulates system prompt, user prompt template variables, and Jackson JSON output schema.
-   - **Structured JSON Parsing**: Output is mandated as strictly valid JSON parsed via Jackson `ObjectMapper` into typed evaluation DTOs (`EssayFeedbackResponse`, `SpeakingFeedbackResponse`).
-   - **Extensible Pipeline**: Full Writing essays, Task 1 paragraph drills, and Speaking transcripts share the exact same Gemini LLM client (`ILlmClient`) and JSON parsing engine, differing only in the injected `LlmPromptTemplate`.
-
-4. **🎴 Universal Selection-to-Flashcard Pipeline (`IFlashcardService`)**:
-   - **Standardized Port Interface**: Define universal method signature in `modules/flashcard/ports/IFlashcardService.java`:
-     `FlashcardResponse addWord(UUID userId, String word, SourceTag sourceTag, UUID sourceEntityId)`.
-   - **Universal `SourceTag` Enum**: Extensible enum supporting MVP and post-MVP contexts:
-     `READING_PASSAGE`, `SAMPLE_ESSAY`, `DICTATION`, `SPEAKING`, `KNOWLEDGE_BASE`, `QUIZ`, `EXTERNAL`, `MANUAL`.
-   - **Global Cached `WordDefinition` Entity**:
-     - `WordDefinition` entity (`@Entity` extending `BaseEntity`: `word` [unique constraint], `lemma`, `definition`, `exampleSentence`).
-     - When `addWord()` is invoked:
-       1. Normalize `word` to base lemma using NLP/Spring helper.
-       2. Query `WordDefinitionRepository`. If cached definition exists in `word_definitions` table, reuse immediately.
-       3. If missing, invoke `ILlmClient` (Gemini) once to generate definition + example sentence, then persist to `word_definitions`.
-       4. Create `Flashcard` linked to `userId`, `lemma`, `SourceTag`, and `sourceEntityId`.
-     - Guarantees zero duplicate LLM definition requests across all platform users.
-
-5. **🔍 Event-Driven Vector Search Indexing (`IEmbeddingIndexer`)**:
-   - **Domain Event & Interface**:
-     - Interface `common/base/VectorIndexable.java`: Methods `getVectorEntityId()`, `getEntityType()`, `getEmbeddableText()`.
-     - Record `common/events/ContentCreatedEvent.java(VectorIndexable entity)` extending `ApplicationEvent`.
-   - **Event-Driven Pipeline**:
-     1. When any entity implementing `VectorIndexable` (Reading Passage, Sample Essay, Knowledge Base Article) is created/updated, publish `ContentCreatedEvent`.
-     2. `VectorIndexingEventListener` (`@EventListener @Async`) in `common/listeners/` intercepts event.
-     3. Calls `IEmbeddingIndexer.index(entity)` which computes text embeddings via `ILlmClient` (Gemini Embedding API) and saves to PostgreSQL `pgvector` table (`content_embeddings`) via `PgVectorEmbeddingIndexerImpl`.
-   - **Extensibility**: Post-MVP content modules automatically inherit semantic vector search by simply implementing `VectorIndexable` and firing `ContentCreatedEvent`.
-
-6. **🔌 Interface-Driven Ports for Deferred AI Features (`IEssayScorer` / `ISpeakingScorer`)**:
-   - **Decoupled Architecture**: Define strict interface contracts in `modules/writing/ports/IEssayScorer.java` and `modules/speaking/ports/ISpeakingScorer.java`.
-   - **Dual Adapter Implementations**:
-     - `MockEssayScorerImpl` / `MockSpeakingScorerImpl`: Fast, deterministic mock evaluation (rubric scores based on word count/heuristics) for local dev/testing (`@Profile("dev")` or `@Fallback`).
-     - `LlmEssayScorerImpl` / `LlmSpeakingScorerImpl`: Production AI evaluation utilizing `ILlmClient` + `LlmPromptTemplate` (`@Profile("prod")` or `@Primary`).
-   - **Zero-Touch Controllers**: `WritingCheckServiceImpl` and `SpeakingServiceImpl` depend strictly on the interface ports. Swapping between mock and live AI evaluation requires zero changes to controllers, service orchestration, or JPA database schemas.
-
----
-
-## **2. Full Backend Folder Tree**
-
-```text
-backend/
-├── Dockerfile                                         # [Person B] Docker container image build file
-├── docker-compose.yml                                 # [Person B] Local multi-container setup (PostgreSQL 17 + Redis 7)
-├── docker-compose.prod.yml                            # [Person A] Production Docker Compose setup
+com.ieltsplatform/
+├── common/                               # SHARED KERNEL (Maintained by Person A, consumed by both)
+│   ├── base/                             # BaseEntity, AudioContent
+│   ├── config/                           # SecurityConfig, OpenApiConfig, RedisConfig
+│   ├── exception/                        # GlobalExceptionHandler, ApiError, DomainException
+│   ├── ports/                            # Generic Strategy Ports (ILlmClient, ITtsClient, IStorageClient, IAnswerScorer)
+│   └── services/impl/                    # Client Adapters & Strategy Registries
 │
-├── src/main/java/com/ieltsplatform/
-│   ├── IeltsPlatformApplication.java                  # Spring Boot entrypoint; also where @EnableJpaAuditing goes
-│   │
-│   ├── common/                                         # [Person A] Shared kernel & Reusable Ports
-│   │   ├── config/
-│   │   │   ├── SecurityConfig.java
-│   │   │   ├── OpenApiConfig.java
-│   │   │   └── RedisConfig.java
-│   │   ├── exception/
-│   │   │   ├── GlobalExceptionHandler.java
-│   │   │   ├── ApiError.java
-│   │   │   └── DomainException.java
-│   │   ├── dtos/
-│   │   │   └── ScoreResult.java                       # Standard scoring output DTO for IAnswerScorer
-│   │   ├── prompt/
-│   │   │   └── LlmPromptTemplate.java                 # Reusable JSON prompt strategy for Writing & Speaking LLM calls
-│   │   ├── events/
-│   │   │   └── ContentCreatedEvent.java               # Spring ApplicationEvent published on new content creation
-│   │   ├── listeners/
-│   │   │   └── VectorIndexingEventListener.java       # Async event listener invoking IEmbeddingIndexer
-│   │   ├── base/
-│   │   │   ├── BaseEntity.java                   # BASE ENTITY — ALL JPA entities extend this class for metadata
-│   │   │   ├── AudioContent.java                  # REUSABLE AUDIO EMBEDDABLE (audioUrl, transcript, cefrLevel)
-│   │   │   └── VectorIndexable.java               # Interface for vector-indexable domain entities
-│   │   ├── ports/
-│   │   │   ├── ILlmClient.java                    # Shared Gemini LLM Port
-│   │   │   ├── ITtsClient.java                    # Shared Cartesia TTS Port
-│   │   │   ├── ISttClient.java                    # Shared Deepgram STT Port
-│   │   │   ├── IStorageClient.java                # Shared S3 Storage Port
-│   │   │   ├── IAnswerScorer.java                 # Generic Rule Engine Scoring Strategy (MCQ, TFNG, FillBlank)
-│   │   │   └── IEmbeddingIndexer.java             # Event-Driven Vector Indexing Port (pgvector)
-│   │   └── services/impl/
-│   │       ├── GeminiLlmClientImpl.java          # [Person A] Google Gemini LLM API Adapter
-│   │       ├── CartesiaTtsClientImpl.java        # [Person A] Cartesia Sonic 3.5 TTS API Adapter
-│   │       ├── DeepgramSttClientImpl.java        # [Person A] Deepgram Nova-3 STT API Adapter
-│   │       ├── S3StorageClientImpl.java          # [Person A] AWS S3 / MinIO Storage Adapter
-│   │       ├── PgVectorEmbeddingIndexerImpl.java # [Person A] Event-driven pgvector indexing adapter
-│   │       ├── AnswerScorerRegistry.java         # [Person B] Strategy registry for dispatching IAnswerScorer by QuestionType
-│   │       ├── McqScorerImpl.java                # [Person B] Reusable MCQ Scoring Strategy
-│   │       ├── TfNgScorerImpl.java               # [Person B] Reusable True/False/Not-Given Scoring Strategy
-│   │       ├── FillBlankScorerImpl.java          # [Person B] Reusable Fill-in-Blank Scoring Strategy
-│   │       └── RateLimitFilter.java              # [Person A] Redis token bucket rate limiting filter
-│   │
-│   └── modules/
-│       ├── auth/                          # [Person A] entities/ repository/ dtos/ mapper/ (AuthMapper) ports/ services/impl/ controllers/
-│       ├── user/                          # [Person A] entities/ repository/ dtos/ mapper/ (UserMapper) ports/ services/impl/ controllers/
-│       ├── content/                       # [Person B] entities/ (ReadingPassage) repository/ dtos/ mapper/ (ContentMapper) ports/ services/impl/ controllers/
-│       ├── assessment/                    # [Person B]
-│       │   ├── entities/
-│       │   │   ├── TestAttempt.java              # Full Mock Exam Attempt entity
-│       │   │   ├── TestAnswer.java               # Mock Exam Question Answer entity
-│       │   │   └── PracticeAttempt.java          # Lightweight Isolated Drill Attempt entity (Reuses IAnswerScorer)
-│       │   ├── repository/
-│       │   │   ├── TestAttemptRepository.java
-│       │   │   ├── TestAnswerRepository.java
-│       │   │   └── PracticeAttemptRepository.java
-│       │   ├── dtos/
-│       │   ├── mapper/
-│       │   │   └── AssessmentMapper.java         # Reusable Assessment Mapper DTO <-> Entity
-│       │   ├── ports/
-│       │   │   └── IAssessmentService.java
-│       │   ├── services/impl/
-│       │   │   └── AssessmentServiceImpl.java
-│       │   └── controllers/
-│       ├── dictation/                     # [Person A] entities/ repository/ dtos/ mapper/ (DictationMapper) ports/ services/impl/ controllers/
-│       ├── writing/                       # [Person B]
-│       │   ├── entities/
-│       │   │   ├── EssaySubmission.java          # Implements VectorIndexable
-│       │   │   └── EssayFeedback.java
-│       │   ├── repository/
-│       │   ├── dtos/
-│       │   ├── mapper/
-│       │   │   └── WritingMapper.java            # Reusable Writing Mapper
-│       │   ├── ports/
-│       │   │   ├── IEssayScorer.java             # Decoupled Essay Scoring Port Interface
-│       │   │   └── IWritingCheckService.java
-│       │   ├── services/impl/
-│       │   │   ├── MockEssayScorerImpl.java      # Fast Deterministic Stub (@Profile("dev"))
-│       │   │   ├── LlmEssayScorerImpl.java       # Production Gemini AI Scorer (@Profile("prod") / @Primary)
-│       │   │   └── WritingCheckServiceImpl.java
-│       │   └── controllers/
-│       ├── speaking/                      # [Person B]
-│       │   ├── entities/
-│       │   │   └── SpeakingSession.java          # Embeds AudioContent
-│       │   ├── repository/
-│       │   ├── dtos/
-│       │   ├── mapper/
-│       │   │   └── SpeakingMapper.java           # Reusable Speaking Mapper
-│       │   ├── ports/
-│       │   │   ├── ISpeakingScorer.java          # Decoupled Speaking Scoring Port Interface
-│       │   │   └── ISpeakingService.java
-│       │   ├── services/impl/
-│       │   │   ├── MockSpeakingScorerImpl.java   # Fast Deterministic Stub (@Profile("dev"))
-│       │   │   ├── LlmSpeakingScorerImpl.java    # Production Gemini AI Scorer (@Profile("prod") / @Primary)
-│       │   │   └── SpeakingServiceImpl.java
-│       │   └── controllers/
-│       ├── listening/                     # [Person A] entities/ repository/ dtos/ mapper/ (ListeningMapper) ports/ services/impl/ controllers/
-│       └── flashcard/                     # [Person B]
-│           ├── entities/
-│           │   ├── Flashcard.java                # Flashcard User Card entity
-│           │   ├── FlashcardReview.java          # SM-2 Review Schedule entity
-│           │   ├── SourceTag.java                # Universal Source Tag Enum
-│           │   └── WordDefinition.java           # Global Cached Definition entity (word_definitions table)
-│           ├── repository/
-│           │   ├── FlashcardRepository.java
-│           │   ├── FlashcardReviewRepository.java
-│           │   └── WordDefinitionRepository.java # Repository for cached definitions
-│           ├── dtos/
-│           ├── mapper/
-│           │   └── FlashcardMapper.java          # Reusable Flashcard Mapper
-│           ├── ports/
-│           │   ├── ISpacedRepetitionScheduler.java
-│           │   └── IFlashcardService.java        # addWord(userId, word, sourceTag, sourceEntityId)
-│           ├── services/impl/
-│           │   ├── Sm2SchedulerImpl.java
-│           │   └── FlashcardServiceImpl.java
-│           └── controllers/
+└── modules/
+    ├── [Person A Packages]               # modules/auth, modules/user, modules/assessment, modules/writing
+    └── [Person B Packages]               # modules/content, modules/flashcard, modules/dictation
 ```
 
----
-
-## **3. The Flashcard Feature, Defined (Person B's centerpiece)**
-
-* **Add from anywhere:** a word/phrase can be added to the deck from a reading passage, an essay, a dictation transcript, a speaking transcript, a knowledge base article, or typed manually.  
-* **Duplicate detection:** on add, normalize the word to its base form (lemma) and check if it already exists for that user before inserting.  
-* **Source tagging:** every card remembers where it was learned using the `SourceTag` enum (`READING_PASSAGE, SAMPLE_ESSAY, DICTATION, SPEAKING, KNOWLEDGE_BASE, QUIZ, EXTERNAL, MANUAL`).  
-* **Auto-generated definitions:** on add, call Google Gemini LLM for a definition + example sentence; cache by word in `word_definitions` so it's only generated once, not once per user.  
-* **Spaced-repetition review:** SM-2 algorithm schedules the next review date based on how well the user recalled the card.  
-* **Central vocabulary page (API only for now):** `GET /flashcards` lists everything, filterable by tag/mastery/date.  
-* **Mastery tracking:** a card can be marked mastered to stop appearing in daily review.
-
-**Data model (All entities extend `BaseEntity`):**
-
-* `Flashcard` (Extends `BaseEntity`): `userId, word, lemma, definition, exampleSentence, sourceTag, masteryLevel` *(metadata: `id, createdAt, updatedAt` inherited)*  
-* `FlashcardReview` (Extends `BaseEntity`, **one-to-one** with `Flashcard`): `flashcard (FK), nextReviewAt, easeFactor, intervalDays, lastReviewedAt` *(metadata: `id, createdAt, updatedAt` inherited)*
+### Strict Non-Overlapping Git Rules:
+1. **Zero File Collisions:** Person A only touches `modules/auth/`, `modules/user/`, `modules/assessment/`, and `modules/writing/`. Person B only touches `modules/content/`, `modules/flashcard/`, and `modules/dictation/`.
+2. **Shared Kernel Protocol:** Only Person A updates `common/`. If Person B requires a change to a shared interface or DTO, they align in standup, Person A pushes to `main`, and Person B pulls.
+3. **Automated Testing Gate:** Every weekly task requires both unit tests for services/algorithms and `MockMvc` integration tests for controllers before a pull request can be merged.
 
 ---
 
-## **4. Week-by-Week File-Level Task Guide**
-
-### **Week 1 — Foundation & Environment Setup**
-
-> **Week 1 High-Level Overview:**  
-> Establish core backend infrastructure, security, authentication, and generic scoring strategy interfaces (Person A), alongside Docker container environment setup, reading passage content serving, and initial test data seeding (Person B).
-
-#### **Person A**
-
-* **High-Level Task Overview:**
-  * **Core Scope:** Construct the shared kernel (`common/` package) — Spring Security filter chain, JWT authentication, OpenAPI/Swagger configuration, Redis connection template, global exception handling (`GlobalExceptionHandler`), standard base entity (`BaseEntity`), reusable audio embeddable (`AudioContent`), vector indexing interface (`VectorIndexable`), JSON prompt template builder (`LlmPromptTemplate`), content event (`ContentCreatedEvent`), standardized scoring DTO (`ScoreResult`), and shared ports (`ILlmClient`, `ITtsClient`, `ISttClient`, `IStorageClient`, `IAnswerScorer`, `IEmbeddingIndexer`). Implement the full `auth` module (signup, login, token refresh, logout) using `AuthMapper`, and `user` entity schema.
-  * **Key Goal:** Secure the API foundation and deliver working authentication endpoints verified through Swagger UI.
-
-| File | What to do |
-| ----- | ----- |
-| `common/config/SecurityConfig.java` | `SecurityFilterChain` bean: permit `/auth/**` and Swagger paths, require auth on everything else; register the JWT filter; `@EnableMethodSecurity` for later `@PreAuthorize` use; configure CORS allowed origins. |
-| `common/config/OpenApiConfig.java` | `OpenAPI` bean with title/version + a Bearer-token security scheme so Swagger UI has an "Authorize" button. |
-| `common/config/RedisConfig.java` | `RedisConnectionFactory` (Lettuce) + `RedisTemplate<String,String>` beans — used for rate limiting and session state. |
-| `common/exception/ApiError.java` | Fields: `timestamp, status, error, message, path`. Plain data class. |
-| `common/exception/DomainException.java` | Abstract class extending `RuntimeException`, with an `errorCode` field every module's own exceptions will set. |
-| `common/exception/GlobalExceptionHandler.java` | `@ControllerAdvice`; `@ExceptionHandler` methods for `DomainException` -> 400, `MethodArgumentNotValidException` -> 400 with field errors, generic `Exception` -> 500. Always return `ApiError`. |
-| `common/base/BaseEntity.java` | `@MappedSuperclass`, `@EntityListeners(AuditingEntityListener.class)`: Base entity for metadata — `id` (`@Id @GeneratedValue UUID`), `createdAt` (`@CreatedDate`), `updatedAt` (`@LastModifiedDate`). **All module JPA entities MUST extend this class.** |
-| `common/base/AudioContent.java` | `@Embeddable` reusable class: `audioUrl (String), transcript (Text), duration (Integer), cefrLevel (String)`. Shared by Listening, Dictation, & Speaking. |
-| `common/base/VectorIndexable.java` | Interface defining `getVectorEntityId()`, `getEntityType()`, and `getEmbeddableText()`. Base contract for event-driven vector search indexing via `IEmbeddingIndexer`. |
-| `common/prompt/LlmPromptTemplate.java` | Reusable JSON prompt template strategy builder encapsulating system prompt, template variables, and Jackson JSON output schema for `ILlmClient`. |
-| `common/events/ContentCreatedEvent.java` | Spring `ApplicationEvent` carrying created entity metadata (`VectorIndexable entity`) for asynchronous vector search indexing. |
-| `common/dtos/ScoreResult.java` | Standardized scoring output DTO (`boolean isCorrect`, `double score`, `String feedback`, `String normalizedAnswer`) for `IAnswerScorer`. |
-| `common/ports/ILlmClient.java` | Shared Gemini LLM Port: `String generate(String prompt)`. |
-| `common/ports/ITtsClient.java` | Shared Cartesia TTS Port: `AudioResult synthesize(String script, String voiceId)` — returns audio bytes + duration. |
-| `common/ports/ISttClient.java` | Shared Deepgram STT Port: `String transcribe(byte[] audioBytes)`. |
-| `common/ports/IStorageClient.java` | Shared S3 Storage Port: `String upload(String key, byte[] content, String contentType)`, `String presignedUrl(String key)`, `void delete(String key)`. |
-| `common/ports/IAnswerScorer.java` | Generic scoring strategy port interface: `ScoreResult score(Question question, String userAnswer)` and `QuestionType getSupportedType()` — reusable by `TestAttempt` (mock exams) and `PracticeAttempt` (isolated Reading Drills, Dictation, Grammar Quizzes). |
-| `common/ports/IEmbeddingIndexer.java` | Event-driven vector search indexing port interface: `void index(VectorIndexable entity)` for pgvector insertion. |
-| `modules/auth/entities/RefreshToken.java` | Extends `BaseEntity`. Fields: `userId (UUID), tokenHash (String), expiresAt (Instant), revoked (boolean)`. |
-| `modules/auth/repository/RefreshTokenRepository.java` | `extends JpaRepository<RefreshToken, UUID>` + `Optional<RefreshToken> findByTokenHash(String hash)`. |
-| `modules/auth/dtos/request/SignupRequest.java` | `email` (`@Email @NotBlank`), `password` (`@NotBlank @Size(min=8)`), `name`. |
-| `modules/auth/dtos/request/LoginRequest.java` | `email`, `password`. |
-| `modules/auth/dtos/response/AuthTokenResponse.java` | `accessToken, refreshToken, expiresIn`. |
-| `modules/auth/mapper/AuthMapper.java` | Static mapper helper converting Auth DTOs and token entities. |
-| `modules/auth/ports/IAuthService.java` | `AuthTokenResponse signup(SignupRequest)`, `login(LoginRequest)`, `refresh(String refreshToken)`, `void logout(String refreshToken)`. |
-| `modules/auth/services/impl/AuthServiceImpl.java` | Implements `IAuthService` using `AuthMapper`. `signup()`: check email uniqueness via `UserRepository`, hash password (`PasswordEncoder`), save `User`, issue tokens. `login()`: look up by email, verify password, issue tokens. `refresh()`: validate stored `RefreshToken`, rotate it, issue a new access token. `logout()`: mark token revoked. |
-| `modules/auth/controllers/AuthController.java` | `POST /api/auth/signup`, `/login`, `/refresh`, `/logout` — each calls `IAuthService` and wraps the result in `ResponseEntity`. |
-| `modules/user/entities/User.java` | Extends `BaseEntity`. Fields: `email (unique), passwordHash, name, role (UserRole), locale, avatarUrl`. |
-| `modules/user/entities/UserRole.java` | Enum: `FREE, PAID, ADMIN`. |
-| `modules/user/repository/UserRepository.java` | `extends JpaRepository<User, UUID>` + `Optional<User> findByEmail(String email)`. |
-
-#### **Person B**
-
-* **High-Level Task Overview:**
-  * **Core Scope:** Set up local Docker containerization (`Dockerfile` and `docker-compose.yml` for PostgreSQL 17 & Redis 7). Build the `content` module to serve IELTS reading passages filterable by CEFR level (`GET /api/content/passages`) using `ReadingPassage` and `ContentMapper`. Seed initial reading passage test data (~10 real passages across levels).
-  * **Key Goal:** Provide a working local Docker environment, and a browsable reading content API by level. `VectorIndexable`, vector search integration, and flashcard extraction will be wired in Week 2 once Person A has built the required infrastructure (`IEmbeddingIndexer`, `PgVectorEmbeddingIndexerImpl`).
-
-| File | What to do |
-| ----- | ----- |
-| `Dockerfile` | Multi-stage Docker build file for Spring Boot Java 21 app (builder stage + slim JDK runtime stage). |
-| `docker-compose.yml` | Multi-container compose configuration defining `postgres` (PostgreSQL 17 on port 5432) and `redis` (Redis 7 on port 6379) with healthchecks and persistent data volumes. |
-| `modules/content/entities/ReadingPassage.java` | Extends `BaseEntity`. Fields: `title, body (Text), level (String, e.g., "B1"), topic, wordCount`. Leave `VectorIndexable` implementation for Week 2 — Person A's `IEmbeddingIndexer` does not exist yet. |
-| `modules/content/repository/ReadingPassageRepository.java` | `extends JpaRepository<ReadingPassage, UUID>` + `List<ReadingPassage> findByLevel(String level)`. |
-| `modules/content/dtos/response/ReadingPassageResponse.java` | `id, title, body, level, topic`. |
-| `modules/content/mapper/ContentMapper.java` | Reusable mapper converting `ReadingPassage` entity to `ReadingPassageResponse` DTO (`toResponse(ReadingPassage entity)`). |
-| `modules/content/ports/IContentService.java` | `List<ReadingPassageResponse> getPassages(String level)`, `ReadingPassageResponse getPassageById(UUID id)`. |
-| `modules/content/services/impl/ContentServiceImpl.java` | Implements `IContentService` using `ContentMapper`. Throw `DomainException` (404) if `id` not found. No event publishing yet — that is added in Week 2 after Person A delivers `IEmbeddingIndexer`. |
-| `modules/content/controllers/ContentController.java` | `GET /api/content/passages?level=`, `GET /api/content/passages/{id}`. No flashcard endpoint yet — `IFlashcardService` is not built until Week 2. |
-| `(seed data)` | A `data.sql` or a small `CommandLineRunner` bean that inserts ~10 real reading passages across levels (A1, B1, B2, C1) as test data. |
-
-**Deliverable:** Local Docker environment running Postgres & Redis; reading passages seeded and retrievable by level via Swagger. Vector search, flashcard extraction, and event publishing are wired in Week 2 after Person A delivers the required infrastructure.
+# 📅 WEEK-BY-WEEK TECHNICAL SPECIFICATIONS
 
 ---
 
-### **Week 2 — AI Service Adapters (A) / Assessment Engine (B)**
+## 🟢 WEEK 1: Docker Environment, Base Kernel & Entity Setup
 
-> **Week 2 High-Level Overview:**  
-> Integrate external AI/cloud adapters for Google Gemini, Cartesia TTS, Deepgram STT, S3 Storage, and pgvector vector search indexing (Person A), while constructing the core mock test assessment engine for Reading & Listening tests using generic scoring strategies and `PracticeAttempt` support (Person B).
-
-#### **Person A**
-
-* **High-Level Task Overview:**
-  * **Core Scope:** Implement concrete external service adapters implementing shared ports: `GeminiLlmClientImpl` (`ILlmClient`) using `LlmPromptTemplate` for JSON formatting, `CartesiaTtsClientImpl` (`ITtsClient`) populating `AudioContent`, `DeepgramSttClientImpl` (`ISttClient`), `S3StorageClientImpl` (`IStorageClient`), and `PgVectorEmbeddingIndexerImpl` (`IEmbeddingIndexer`). Create `VectorIndexingEventListener` (`@EventListener @Async`) to process `ContentCreatedEvent`. Expand `user` module with `UserMapper`, profile updates, and avatar image uploads to S3.
-  * **Key Goal:** Deliver operational external AI, storage, and vector indexing adapters, along with user profile management.
-
-| File | What to do |
-| ----- | ----- |
-| `common/services/impl/GeminiLlmClientImpl.java` | Implements `ILlmClient` port interface — HTTP call to Google Gemini API. Formats prompt requests using `LlmPromptTemplate` for JSON output parsing across Writing and Speaking. |
-| `common/services/impl/CartesiaTtsClientImpl.java` | Implements `ITtsClient` port interface — calls Cartesia Sonic 3.5 TTS API for ultra-low latency audio synthesis. Populates `AudioContent` embeddables reusable by Listening, Dictation, & Speaking. |
-| `common/services/impl/DeepgramSttClientImpl.java` | Implements `ISttClient` port interface — calls Deepgram Nova-3 STT API, returns transcript string. Reusable by Speaking & Dictation audio processing. |
-| `common/services/impl/S3StorageClientImpl.java` | Implements `IStorageClient` port interface — AWS SDK (or MinIO client) calls for upload/presign/delete. Stores audio assets for `AudioContent`. |
-| `common/services/impl/PgVectorEmbeddingIndexerImpl.java` | Implements `IEmbeddingIndexer` port interface — generates vector embeddings for `VectorIndexable` entities via `ILlmClient` and writes to `pgvector` store (`content_embeddings`). |
-| `common/listeners/VectorIndexingEventListener.java` | `@Component` listener with `@EventListener @Async` handling `ContentCreatedEvent`. Invokes `IEmbeddingIndexer.index(event.getEntity())` asynchronously to ensure non-blocking HTTP transactions. |
-| `modules/user/dtos/request/UpdateProfileRequest.java`, `modules/user/dtos/response/UserResponse.java` | `UpdateProfileRequest`: `name, locale`. `UserResponse`: everything except `passwordHash`. |
-| `modules/user/mapper/UserMapper.java` | Reusable mapper converting `User` entity to `UserResponse` DTO (`toResponse(User)`). |
-| `modules/user/ports/IUserService.java`, `modules/user/ports/IPasswordResetService.java` | `IUserService`: `getProfile(userId)`, `updateProfile(userId, request)`, `uploadAvatar(userId, bytes)`. `IPasswordResetService`: `requestReset(email)`, `confirmReset(token, newPassword)`. |
-| `modules/user/services/impl/UserServiceImpl.java` | Implements `IUserService` using `UserMapper`. `uploadAvatar()` calls `IStorageClient.upload()` and saves the returned URL onto the `User` entity. |
-| `modules/user/services/impl/PasswordResetServiceImpl.java` | Implements `IPasswordResetService`; generates a signed/expiring token, stores or encodes it, sends via email. |
-| `modules/user/controllers/UserController.java` | `GET /api/users/me`, `PATCH /api/users/me`, `POST /api/users/me/avatar`. |
-
-#### **Person B**
-
-* **High-Level Task Overview:**
-  * **Core Scope:** Build the central `assessment` engine including full mock exams (`TestAttempt`) and lightweight isolated skill drills (`PracticeAttempt`), using `AssessmentMapper`. Implement concrete `IAnswerScorer` strategies (`McqScorerImpl`, `TfNgScorerImpl`, `FillBlankScorerImpl`) and `AnswerScorerRegistry` in `common/services/impl/`. In `AssessmentServiceImpl`, inject `AnswerScorerRegistry` to score both `TestAttempt` mock exams and `PracticeAttempt` drills using the exact same strategy beans, ensuring **zero code duplication**. Enforce server-side elapsed time validation.
-  * **Key Goal:** Enable starting, answering, submitting, and scoring Reading mock tests and practice drills via Swagger under authentic exam time constraints, using reusable scoring strategies.
-
-| File | What to do |
-| ----- | ----- |
-| `modules/assessment/entities/TestAttempt.java` | Extends `BaseEntity`. Fields: `userId, skill (READING/LISTENING), startedAt, submittedAt, overallScore`. Represents full mock examination sessions. |
-| `modules/assessment/entities/PracticeAttempt.java` | Extends `BaseEntity`. Fields: `userId, moduleType (READING/LISTENING/GRAMMAR/DICTATION), topic, score, durationSeconds`. Lightweight entity for isolated skill drills (Reading drills, Dictation drills, Grammar quizzes). Reuses `IAnswerScorer`. |
-| `modules/assessment/entities/TestAnswer.java` | Extends `BaseEntity`. Fields: `attemptId (FK, ManyToOne to TestAttempt/PracticeAttempt), questionId, userAnswer, isCorrect, score`. |
-| `modules/assessment/repository/TestAttemptRepository.java`, `PracticeAttemptRepository.java`, `TestAnswerRepository.java` | Standard `JpaRepository` interfaces for mock exam attempts and isolated drill practice attempts. |
-| `modules/assessment/dtos/request/SubmitAnswerRequest.java` | `questionId, userAnswer, attemptType (TEST/PRACTICE)`. |
-| `modules/assessment/dtos/response/TestAttemptResponse.java`, `modules/assessment/dtos/response/ScoreResponse.java` | Attempt state; final score breakdown. |
-| `modules/assessment/mapper/AssessmentMapper.java` | Static mapper helper converting `TestAttempt` -> `TestAttemptResponse`, `PracticeAttempt` -> `PracticeAttemptResponse`, and `TestAnswer` -> `ScoreResponse`. |
-| `common/services/impl/McqScorerImpl.java` | Implements `IAnswerScorer` port interface — exact match against correct option. Reusable by `TestAttempt` (Mock Tests) & `PracticeAttempt` (Grammar/Reading Quizzes). |
-| `common/services/impl/TfNgScorerImpl.java` | Implements `IAnswerScorer` port interface — exact match against True/False/Not-Given. Reusable by `TestAttempt` & `PracticeAttempt` Reading Drills. |
-| `common/services/impl/FillBlankScorerImpl.java` | Implements `IAnswerScorer` port interface — case-insensitive, typo-tolerant match (Levenshtein distance <= 1). Reusable by `TestAttempt`, `PracticeAttempt` Dictation & Listening. |
-| `common/services/impl/AnswerScorerRegistry.java` | Strategy registry bean injecting `Map<QuestionType, IAnswerScorer>` for dynamic strategy dispatch by question type. Shared kernel bean. |
-| `modules/assessment/ports/IAssessmentService.java` | `startAttempt(userId, skill, attemptType)`, `submitAnswer(attemptId, request)`, `submitAttempt(attemptId)`. |
-| `modules/assessment/services/impl/AssessmentServiceImpl.java` | 🔶 Implements `IAssessmentService` using `AssessmentMapper` and explicitly injecting `AnswerScorerRegistry` / `Map<QuestionType, IAnswerScorer>`. Scores both `TestAttempt` mock exam answers and `PracticeAttempt` skill drill answers using the same strategy beans, ensuring **zero code duplication**. Enforces server-side time limits. |
-| `modules/assessment/controllers/AssessmentController.java` | `POST /api/assessment/attempts`, `POST /api/assessment/attempts/{id}/answers`, `POST /api/assessment/attempts/{id}/submit`. |
-| `(seed data)` | Seed one full Reading test and 5 isolated practice drill questions against Week 1's reading passages. |
-
-**Deliverable:** All AI and vector adapters (Gemini, Cartesia, Deepgram, S3, pgvector) are operational. Reading mock tests and practice drills can be started, answered, time-validated, and scored via Swagger using reusable scoring strategies.
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Establish the shared backend kernel (`BaseEntity`, global error handling, open security configuration) and model the `User` identity domain.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`common/base/BaseEntity.java`**:
+     - Class: `public abstract class BaseEntity` annotated with `@MappedSuperclass` and `@EntityListeners(AuditingEntityListener.class)`.
+     - Fields:
+       - `@Id @GeneratedValue(strategy = GenerationType.UUID) @Column(name = "id", updatable = false, nullable = false) private UUID id;`
+       - `@CreatedDate @Column(name = "created_at", nullable = false, updatable = false) private Instant createdAt;`
+       - `@LastModifiedDate @Column(name = "updated_at", nullable = false) private Instant updatedAt;`
+       - `@Version @Column(name = "version", nullable = false) private Long version;`
+     - Methods: Implement `equals(Object o)` and `hashCode()` strictly comparing non-null `id`.
+  2. **`common/exception/ApiError.java` & `DomainException.java`**:
+     - `ApiError`: Fields `Instant timestamp`, `int status`, `String error`, `String message`, `String path`, `Map<String, String> validationErrors`.
+     - `DomainException`: Abstract `RuntimeException` with `HttpStatus status` and `String errorCode`.
+     - Subclasses: `ResourceNotFoundException` (404), `DuplicateResourceException` (409), `BadRequestException` (400).
+  3. **`common/exception/GlobalExceptionHandler.java`**:
+     - `@RestControllerAdvice` class intercepting:
+       - `DomainException` -> returns `ApiError` with specific status.
+       - `MethodArgumentNotValidException` -> parses `fieldErrors` into `validationErrors` map (HTTP 400).
+       - `Exception` -> logs error and returns generic `INTERNAL_SERVER_ERROR` (HTTP 500).
+  4. **`common/config/SecurityConfig.java` (Open Phase)**:
+     - `@Configuration @EnableWebSecurity` defining `SecurityFilterChain` bean:
+     - Permissive rule for Weeks 1–2: `.authorizeHttpRequests(auth -> auth.requestMatchers("/api/**", "/swagger-ui/**", "/v3/api-docs/**").permitAll().anyRequest().authenticated())`.
+     - Enables CORS with allowed origins `http://localhost:3000` and disables CSRF for stateless REST.
+  5. **`modules/user/entities/User.java` & `UserRole.java`**:
+     - `User` extends `BaseEntity`. Annotate with `@Entity @Table(name = "users")`.
+     - Fields: `email` (unique, nullable=false), `passwordHash` (nullable=false), `name` (nullable=false), `role` (`@Enumerated(EnumType.STRING)`), `targetBandScore` (Double), `avatarUrl` (String).
+     - `UserRole` enum: `FREE`, `PAID`, `ADMIN`.
+  6. **`modules/user/repository/UserRepository.java`**:
+     - `public interface UserRepository extends JpaRepository<User, UUID>` with `Optional<User> findByEmail(String email)` and `boolean existsByEmail(String email)`.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/common/GlobalExceptionHandlerTest.java`:
+    - Test that throwing `ResourceNotFoundException` returns HTTP 404 with structured `ApiError` JSON.
+    - Test that invalid request body returns HTTP 400 with field-specific validation error details.
+  - Verification Command: `mvn test -Dtest=GlobalExceptionHandlerTest` (Must pass with 0 errors).
 
 ---
 
-### **Week 3 — Dictation & Security (A) / Writing & Speaking Audio (B)**
-
-> **Week 3 High-Level Overview:**  
-> Build the dictation exercise module and Redis rate limiting (Person A), while constructing decoupled AI writing evaluation and speaking audio recording pipelines (Person B).
-
-#### **Person A**
-
-* **High-Level Task Overview:**
-  * **Core Scope:** Build the full `dictation` exercise module using `DictationMapper`. `DictationItem` entity embeds `@Embedded AudioContent audio` (`audioUrl, transcript, cefrLevel`) powered by `ITtsClient` (Cartesia) and `IStorageClient` (S3). Implement word-level Levenshtein diff scoring in `DictationScorerImpl` reusing `FillBlankScorerImpl` strategy from `IAnswerScorer`. Evaluate dictation submissions as a `PracticeAttempt`. Enable word selection into flashcards via `IFlashcardService.addWord()` with `SourceTag.DICTATION` and `word_definitions` cache table lookup. Implement Redis-based rate limiting (`RateLimitFilter`) on sensitive endpoints, and build unit test coverage.
-  * **Key Goal:** Deliver operational dictation exercises, enforce rate limiting on AI/auth endpoints, and write core unit tests.
-
-| File | What to do |
-| ----- | ----- |
-| `modules/dictation/entities/DictationItem.java` | Extends `BaseEntity`. Embeds `@Embedded AudioContent audio` (`audioUrl, transcript, cefrLevel`). Shared audio structure powered by `ITtsClient` and `IStorageClient`. Reusable for dictation `PracticeAttempt` drills. |
-| `modules/dictation/repository/DictationItemRepository.java` | `extends JpaRepository<DictationItem, UUID>` + `List<DictationItem> findByLevel(String level)`. |
-| `modules/dictation/dtos/request/SubmitDictationRequest.java`, `modules/dictation/dtos/response/DictationResultResponse.java` | Request: `userInput (String)`. Response: `correctWordCount, totalWordCount, diffHighlights (List)`. |
-| `modules/dictation/mapper/DictationMapper.java` | Reusable mapper converting `DictationItem` entity to `DictationItemResponse` DTO and scoring results to `DictationResultResponse`. |
-| `modules/dictation/ports/IDictationService.java`, `modules/dictation/ports/IDictationScorer.java` | `IDictationService`: `getItem(id)`, `submit(id, request)`. `IDictationScorer`: `ScoreResult score(String transcript, String userInput)`. |
-| `modules/dictation/services/impl/DictationScorerImpl.java` | Implements `IDictationScorer` (reusing `FillBlankScorerImpl` strategy from `IAnswerScorer`) — word-level diff (Levenshtein distance) between `transcript` and `userInput`. |
-| `modules/dictation/services/impl/DictationServiceImpl.java` | Implements `IDictationService` using `DictationMapper`. Synthesizes missing audio via `ITtsClient` (Cartesia) and stores via `IStorageClient` (S3). Evaluates submission as a `PracticeAttempt`. Enables direct word selection into flashcards via `IFlashcardService.addWord()` with `SourceTag.DICTATION` and `word_definitions` cache table lookup. |
-| `modules/dictation/controllers/DictationController.java` | `GET /api/dictation/{id}`, `POST /api/dictation/{id}/submit`, `POST /api/dictation/{id}/flashcard` (adds target word using `SourceTag.DICTATION` & `word_definitions` cache). |
-| `common/services/impl/RateLimitFilter.java` | Security filter applying Redis token bucket rate limiting on `/auth/**` and AI scoring endpoints. |
-| `(unit tests)` | Write unit tests for `AuthServiceImpl`, `UserServiceImpl`, and `DictationScorerImpl`. |
-
-#### **Person B**
-
-* **High-Level Task Overview:**
-  * **Core Scope:** Construct the `writing` module using `WritingMapper`. `EssaySubmission` extends `BaseEntity` and implements `VectorIndexable`. Define decoupled port interface `IEssayScorer` with dual adapters: `MockEssayScorerImpl` (`@Profile("dev")`) and `LlmEssayScorerImpl` (`@Profile("prod")` or `@Primary`) injecting `ILlmClient` and `LlmPromptTemplate` for structured JSON evaluation. `WritingCheckServiceImpl` saves submission, calls `IEssayScorer`, fires `ContentCreatedEvent` -> `IEmbeddingIndexer` for pgvector indexing, and enables vocabulary selection via `IFlashcardService.addWord()` with `SourceTag.SAMPLE_ESSAY` and `word_definitions` cache lookup. Support both `TestAttempt` essays and Task 1 `PracticeAttempt` drills. Construct the `speaking` module using `SpeakingMapper`. `SpeakingSession` embeds `@Embedded AudioContent audio`. Define decoupled port interface `ISpeakingScorer` with dual adapters: `MockSpeakingScorerImpl` (`@Profile("dev")`) and `LlmSpeakingScorerImpl` (`@Profile("prod")` or `@Primary`) using `ILlmClient` + `LlmPromptTemplate`. `SpeakingServiceImpl` uploads audio via `IStorageClient` (S3), transcribes via `ISttClient` (Deepgram Nova-3), populates `AudioContent`, evaluates via `ISpeakingScorer`, and enables vocabulary selection via `IFlashcardService.addWord()` with `SourceTag.SPEAKING` and `word_definitions` cache.
-  * **Key Goal:** Allow users to submit written essays and speaking audio responses evaluated via decoupled AI ports, structured prompt templates, vector search indexing, and flashcard integration.
-
-| File | What to do |
-| ----- | ----- |
-| `modules/writing/entities/EssaySubmission.java` | Extends `BaseEntity`, implements `VectorIndexable`. Fields: `userId, promptId, essayText (Text), wordCount, attemptType (TEST/PRACTICE), submittedAt`. Fires `ContentCreatedEvent` on save for vector indexing. |
-| `modules/writing/entities/EssayFeedback.java` | Extends `BaseEntity`. Fields: `submissionId (FK, ManyToOne), criterion (String), score (Double), comments (Text/JSON)`. |
-| `modules/writing/repository/EssaySubmissionRepository.java`, `modules/writing/repository/EssayFeedbackRepository.java` | Standard JpaRepository interfaces. |
-| `modules/writing/dtos/request/SubmitEssayRequest.java`, `modules/writing/dtos/response/EssaySubmissionResponse.java` | DTO request/response schemas. |
-| `modules/writing/mapper/WritingMapper.java` | Reusable mapper converting `EssaySubmission` and `EssayFeedback` entities to `EssaySubmissionResponse` DTOs. |
-| `modules/writing/ports/IEssayScorer.java` | Interface port contract: `List<EssayFeedback> score(String essayText, String promptText)`. |
-| `modules/writing/services/impl/MockEssayScorerImpl.java` | Implements `IEssayScorer`. Fast deterministic scoring mock based on word count/heuristics (`@Profile("dev")`). |
-| `modules/writing/services/impl/LlmEssayScorerImpl.java` | Implements `IEssayScorer`. Production AI scoring using `ILlmClient` (Gemini) + `LlmPromptTemplate` with Jackson JSON schema parsing (`@Profile("prod")` or `@Primary`). |
-| `modules/writing/ports/IWritingCheckService.java`, `modules/writing/services/impl/WritingCheckServiceImpl.java` | Implements `IWritingCheckService` using `WritingMapper`. Calculates word count, saves `EssaySubmission`, calls `IEssayScorer` interface port (decoupled from concrete scoring implementation), and publishes `ContentCreatedEvent` -> `IEmbeddingIndexer`. Enables vocabulary extraction via `IFlashcardService` with `SourceTag.SAMPLE_ESSAY` and `word_definitions` cache lookup. Handles both `TestAttempt` and `PracticeAttempt`. |
-| `modules/writing/controllers/WritingController.java` | `POST /api/writing/submissions`, `GET /api/writing/submissions/{id}`, `POST /api/writing/submissions/{id}/flashcard` (extracts word using `SourceTag.SAMPLE_ESSAY` & `word_definitions` cache). |
-| `modules/speaking/entities/SpeakingSession.java` | Extends `BaseEntity`. Embeds `@Embedded AudioContent audio` (`audioUrl, transcript, cefrLevel`). Reusable for full `TestAttempt` speaking tests and `PracticeAttempt` voice drills. |
-| `modules/speaking/repository/SpeakingSessionRepository.java` | Standard `JpaRepository`. |
-| `modules/speaking/dtos/response/SpeakingResultResponse.java` | `transcript, criteriaScores, overallBand`. |
-| `modules/speaking/mapper/SpeakingMapper.java` | Reusable mapper converting `SpeakingSession` entity to `SpeakingResultResponse` DTO. |
-| `modules/speaking/ports/ISpeakingScorer.java` | Interface port contract: `List<CriterionScore> score(String transcript)`. |
-| `modules/speaking/services/impl/MockSpeakingScorerImpl.java` | Implements `ISpeakingScorer`. Fast deterministic mock scorer (`@Profile("dev")`). |
-| `modules/speaking/services/impl/LlmSpeakingScorerImpl.java` | Implements `ISpeakingScorer`. Production AI scorer using `ILlmClient` + `LlmPromptTemplate` for structured JSON evaluation (`@Profile("prod")` or `@Primary`). |
-| `modules/speaking/services/impl/SpeakingServiceImpl.java` | 🔶 Implements `ISpeakingService` using `SpeakingMapper`. Uploads audio via `IStorageClient` (S3), transcribes via `ISttClient` (Deepgram Nova-3), populates `@Embedded AudioContent`, and evaluates via `ISpeakingScorer` interface port. Enables vocabulary extraction via `IFlashcardService` with `SourceTag.SPEAKING` and `word_definitions` cache. Supports `TestAttempt` and `PracticeAttempt`. |
-| `modules/speaking/controllers/SpeakingController.java` | `POST /api/speaking/sessions` (upload + transcribe), `GET /api/speaking/sessions/{id}`, `POST /api/speaking/sessions/{id}/flashcard` (extracts word with `SourceTag.SPEAKING` & `word_definitions` cache). |
-
-**Deliverable:** Dictation working via Swagger with rate limiting. Writing essays scored via decoupled `IEssayScorer` (`LlmPromptTemplate` + Gemini), indexed into pgvector via `ContentCreatedEvent`. Speaking responses uploaded to S3, transcribed via Deepgram, and scored via decoupled `ISpeakingScorer`. Flashcard extraction enabled for both.
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Set up the multi-container Docker environment (PostgreSQL 17 + Redis 7) and build the `ReadingPassage` entity and repository.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`docker-compose.yml`**:
+     - Service `postgres`: Image `postgres:17-alpine`, container name `ielts-postgres`, environment `POSTGRES_DB=ielts_db`, `POSTGRES_USER=postgres`, `POSTGRES_PASSWORD=postgres`, ports `"5432:5432"`, healthcheck `pg_isready -U postgres`, persistent named volume `postgres_data:/var/lib/postgresql/data`.
+     - Service `redis`: Image `redis:7-alpine`, container name `ielts-redis`, ports `"6379:6379"`, volume `redis_data:/data`.
+  2. **`backend/src/main/resources/application.yml`**:
+     - Connect Spring Boot to Docker Postgres:
+       ```yaml
+       spring:
+         datasource:
+           url: jdbc:postgresql://localhost:5432/ielts_db
+           username: postgres
+           password: postgres
+           driver-class-name: org.postgresql.Driver
+         jpa:
+           hibernate:
+             ddl-auto: update
+           show-sql: true
+           properties:
+             hibernate.format_sql: true
+       ```
+  3. **`modules/content/entities/ReadingPassage.java`**:
+     - Extends `BaseEntity`. Annotate with `@Entity @Table(name = "reading_passages")`.
+     - Fields:
+       - `title` (`@Column(nullable = false)`),
+       - `body` (`@Column(columnDefinition = "TEXT", nullable = false)`),
+       - `level` (`@Column(length = 10, nullable = false)` - e.g. "B1", "B2", "C1"),
+       - `topic` (`@Column(length = 50, nullable = false)` - e.g. "Environment", "Technology", "History"),
+       - `wordCount` (`@Column(nullable = false)`).
+  4. **`modules/content/repository/ReadingPassageRepository.java`**:
+     - `public interface ReadingPassageRepository extends JpaRepository<ReadingPassage, UUID>` with:
+       - `List<ReadingPassage> findByLevel(String level);`
+       - `List<ReadingPassage> findByTopic(String topic);`
+       - `Page<ReadingPassage> findByLevelAndTopic(String level, String topic, Pageable pageable);`
+* **✅ Expected Results & Automated Test Gate:**
+  - Execute `docker compose up -d` — both containers status `healthy`.
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/content/ReadingPassageRepositoryTest.java`:
+    - Test saving a `ReadingPassage` and querying by `findByLevel("B2")`.
+    - Verify inherited `BaseEntity` fields (`id`, `createdAt`, `version`) are automatically populated.
+  - Verification Command: `mvn test -Dtest=ReadingPassageRepositoryTest` (Must pass with 0 errors).
 
 ---
 
-### **Week 4 — Listening Module & Hardening (A) / Flashcards & QA (B)**
+## 🟢 WEEK 2: Authentication Service & Reading Passage Content Service
 
-> **Week 4 High-Level Overview:**  
-> Build the complete Mock Listening module and perform backend security/production hardening (Person A), while completing the site-wide spaced-repetition vocabulary feature and conducting full regression testing (Person B).
-
-#### **Person A**
-
-* **High-Level Task Overview:**
-  * **Core Scope:** Construct the complete `listening` module using `ListeningMapper`. `ListeningSection` entity embeds `@Embedded AudioContent audio` (`audioUrl, transcript, cefrLevel, topic, questionsJson`). `ListeningServiceImpl` calls `ITtsClient` (`CartesiaTtsClientImpl`) to synthesize audio bytes, uploads via `IStorageClient` (`S3StorageClientImpl`), and persists URL into `AudioContent`. Question scoring reuses `IAnswerScorer` strategies (`McqScorerImpl`, `FillBlankScorerImpl`) for both `TestAttempt` and `PracticeAttempt`. Enable flashcard extraction via `IFlashcardService` using `SourceTag.LISTENING` and `word_definitions` cache table lookup. Finalize `PgVectorEmbeddingIndexerImpl` event listener integration, environmentalize secrets in `application-prod.yml`, and set up production Docker Compose deployment targets (`docker-compose.prod.yml`).
-  * **Key Goal:** Deliver the complete Listening test module, flashcard integration, and ensure a secure, prod-ready containerized backend.
-
-| File | What to do |
-| ----- | ----- |
-| `modules/listening/entities/ListeningSection.java` | Extends `BaseEntity`. Embeds `@Embedded AudioContent audio` (`audioUrl, transcript, cefrLevel, topic, questionsJson`). Reusable by `TestAttempt` Mock Tests & `PracticeAttempt` Listening Drills. |
-| `modules/listening/repository/ListeningSectionRepository.java` | Standard `JpaRepository` + `findByLevel`. |
-| `modules/listening/dtos/response/ListeningSectionResponse.java` | `id, audioUrl, level, topic, questions`. |
-| `modules/listening/mapper/ListeningMapper.java` | Reusable mapper converting `ListeningSection` entity to `ListeningSectionResponse` DTO (`toResponse`). |
-| `modules/listening/ports/IListeningService.java` | `getSection(id)`, `generateSection(script, level)`. |
-| `modules/listening/services/impl/ListeningServiceImpl.java` | 🔶 Implements `IListeningService` using `ListeningMapper`. `generateSection()` calls `ITtsClient` (`CartesiaTtsClientImpl`) for audio synthesis, uploads via `IStorageClient` (`S3StorageClientImpl`), saves `ListeningSection` (`AudioContent`). Integrates question scoring via `IAnswerScorer` strategies (`McqScorerImpl`, `FillBlankScorerImpl`) for both `TestAttempt` and `PracticeAttempt`. Enables flashcard extraction via `IFlashcardService` using `SourceTag.LISTENING` and `word_definitions` cache. |
-| `modules/listening/controllers/ListeningController.java` | `GET /api/listening/{id}`, `POST /api/listening/generate`, `POST /api/listening/{id}/flashcard` (saves word with `SourceTag.LISTENING` & `word_definitions` cache). |
-| `common/services/impl/PgVectorEmbeddingIndexerImpl.java` | Finalize Spring `@EventListener` wiring `ContentCreatedEvent` via `VectorIndexingEventListener` to `PgVectorEmbeddingIndexerImpl` for automated vector search indexing across all content entities. |
-| `resources/application-prod.yml` | Environmentalize DB credentials, Redis URLs, and API keys (`${GEMINI_API_KEY}`, `${CARTESIA_API_KEY}`, `${DEEPGRAM_API_KEY}`). |
-| `docker-compose.prod.yml` | Production Docker Compose target launching Spring Boot container linked to PostgreSQL and Redis services. |
-| `(security hardening)` | Finalize CORS allowed origins, security headers, and rate limits across all endpoints. |
-
-#### **Person B**
-
-* **High-Level Task Overview:**
-  * **Core Scope:** Build the site-wide `flashcard` module using `FlashcardMapper`. Create global cached entity `WordDefinition` (`word_definitions` table), `WordDefinitionRepository`, and universal `SourceTag` enum (`READING_PASSAGE, SAMPLE_ESSAY, DICTATION, SPEAKING, KNOWLEDGE_BASE, QUIZ, EXTERNAL, MANUAL`). Standardize `IFlashcardService.addWord(userId, word, sourceTag, sourceEntityId)`: normalize `word` to base lemma, query `WordDefinitionRepository` to reuse cached definitions, or invoke `ILlmClient` (Gemini API) once to generate definition + example sentence and persist to `word_definitions`. Build SM-2 spaced repetition algorithm in `Sm2SchedulerImpl`. Conduct full regression testing pass across all backend modules.
-  * **Key Goal:** Deliver a central vocabulary tracker with global definition caching, SM-2 spaced repetition, and verify all module endpoints via Swagger.
-
-| File | What to do |
-| ----- | ----- |
-| `modules/flashcard/entities/Flashcard.java` | Extends `BaseEntity`. Fields: `userId, word, lemma, definition, exampleSentence, sourceTag, masteryLevel`. |
-| `modules/flashcard/entities/FlashcardReview.java` | Extends `BaseEntity`. Fields: `flashcard (FK, OneToOne), nextReviewAt, easeFactor, intervalDays, lastReviewedAt`. |
-| `modules/flashcard/entities/SourceTag.java` | Enum: `READING_PASSAGE, SAMPLE_ESSAY, DICTATION, SPEAKING, KNOWLEDGE_BASE, QUIZ, EXTERNAL, MANUAL`. Universal tag enum supporting all MVP and post-MVP modules. |
-| `modules/flashcard/entities/WordDefinition.java` | Extends `BaseEntity`. Global cached definition entity (`word` [unique constraint], `lemma`, `definition`, `exampleSentence`). Mapped to `word_definitions` table. |
-| `modules/flashcard/repository/FlashcardRepository.java`, `FlashcardReviewRepository.java`, `WordDefinitionRepository.java` | `FlashcardRepository`: `Optional<Flashcard> findByUserIdAndLemma(userId, lemma)`. `FlashcardReviewRepository`: `List<FlashcardReview> findByFlashcard_UserIdAndNextReviewAtBefore(userId, now)`. `WordDefinitionRepository`: `Optional<WordDefinition> findByLemma(String lemma)`. |
-| `modules/flashcard/dtos/request/AddFlashcardRequest.java`, `FlashcardResponse.java` | DTO request/response schemas. |
-| `modules/flashcard/mapper/FlashcardMapper.java` | Reusable mapper converting `Flashcard` and `FlashcardReview` entities to `FlashcardResponse` DTOs. |
-| `modules/flashcard/ports/ISpacedRepetitionScheduler.java` | `ReviewSchedule computeNext(FlashcardReview current, int recallQuality)`. |
-| `modules/flashcard/services/impl/Sm2SchedulerImpl.java` | 🔶 Implements SM-2 algorithm: adjusts `easeFactor` based on `recallQuality` (0-5), computes next `intervalDays`, sets `nextReviewAt`. |
-| `modules/flashcard/ports/IFlashcardService.java`, `modules/flashcard/services/impl/FlashcardServiceImpl.java` | Implements `IFlashcardService` using `FlashcardMapper`. Standardizes `addWord(userId, word, sourceTag, sourceEntityId)`: normalizes word to `lemma`, checks shared `WordDefinitionRepository` (`word_definitions` cache table) before executing `ILlmClient` (Gemini API) definition request, records provided `SourceTag` enum, and saves `Flashcard` + initial `FlashcardReview`. `review()` updates schedule using `Sm2SchedulerImpl`. |
-| `modules/flashcard/controllers/FlashcardController.java` | `POST /api/flashcards`, `GET /api/flashcards`, `GET /api/flashcards/due`, `POST /api/flashcards/{id}/review`. |
-| `(regression testing)` | Full regression pass across all modules via Swagger UI. |
-
-**Both:**
-* Full backend integration test end-to-end via Swagger: signup -> take Reading test -> generate & take Listening test -> submit Writing essay -> record Speaking response -> add flashcard -> review flashcard -> Dictation exercise.
-* Fix bugs found; finalize OpenAPI docs; write a short backend runbook.
-
-**Deliverable:** Fully working, fully tested backend for all 6 modules — reachable and demoable entirely through Swagger.
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Implement the full Authentication engine (Signup, Password Hashing, Login, JWT Token generation, and Token Refresh).
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/auth/entities/RefreshToken.java` & `RefreshTokenRepository.java`**:
+     - Extends `BaseEntity`. `@Entity @Table(name = "refresh_tokens")`.
+     - Fields: `userId` (UUID, nullable=false), `tokenHash` (String, unique=true), `expiresAt` (Instant, nullable=false), `revoked` (boolean, default=false).
+     - Repo: `Optional<RefreshToken> findByTokenHash(String hash);` and `void deleteByUserId(UUID userId);`.
+  2. **`modules/auth/dtos/`**:
+     - `SignupRequest`: `email` (`@Email @NotBlank`), `password` (`@NotBlank @Size(min = 8)`), `name` (`@NotBlank`).
+     - `LoginRequest`: `email` (`@Email @NotBlank`), `password` (`@NotBlank`).
+     - `RefreshTokenRequest`: `refreshToken` (`@NotBlank`).
+     - `AuthTokenResponse`: `String accessToken`, `String refreshToken`, `long expiresIn`, `String tokenType`.
+  3. **`modules/auth/services/JwtTokenProvider.java`**:
+     - Uses `io.jsonwebtoken` (jjwt): Generates HMAC-SHA256 signed access tokens (15-min expiration) containing `userId` and `roles`. Generates cryptographically secure random refresh tokens (7-day expiration).
+  4. **`modules/auth/ports/IAuthService.java` & `AuthServiceImpl.java`**:
+     - `AuthTokenResponse signup(SignupRequest req)`: Checks `userRepository.existsByEmail(req.getEmail())` (throws `DuplicateResourceException` if taken); hashes password via `BCryptPasswordEncoder`; saves `User`; issues access + refresh tokens.
+     - `AuthTokenResponse login(LoginRequest req)`: Finds user by email; validates `passwordEncoder.matches()`; revokes old refresh tokens; saves new `RefreshToken`; returns `AuthTokenResponse`.
+     - `AuthTokenResponse refresh(RefreshTokenRequest req)`: Hashes provided token; finds valid non-revoked non-expired `RefreshToken`; rotates refresh token; issues new access token.
+  5. **`modules/auth/controllers/AuthController.java`**:
+     - Endpoints: `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/refresh`. Returns HTTP 200/201 with `AuthTokenResponse`.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/auth/AuthServiceTest.java` (Unit tests with Mockito):
+    - `signup_WhenEmailExists_ThrowsDuplicateException()`
+    - `login_WithValidCredentials_ReturnsTokens()`
+    - `login_WithInvalidPassword_ThrowsBadCredentials()`
+  - Integration Tests in `src/test/java/com/ieltsplatform/modules/auth/AuthControllerTest.java`:
+    - `MockMvc` testing `POST /api/auth/signup` -> HTTP 201 with `accessToken`.
+  - Verification Command: `mvn test -Dtest=AuthServiceTest,AuthControllerTest` (Must pass with 0 errors).
 
 ---
 
-## **5. Notes**
-
-* Every 🔶 item above shares the same shape: call a shared interface Person A built (`ILlmClient`, `ISttClient`, `ITtsClient`), and handle the response. None of them require building a new integration from scratch.
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Implement the complete Reading Passage Content Service with CEFR level/topic filtering and pagination.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/content/dtos/` & `ContentMapper.java`**:
+     - `CreatePassageRequest`: `title` (`@NotBlank`), `body` (`@NotBlank`), `level` (`@Pattern(regexp = "^(A1|A2|B1|B2|C1|C2)$")`), `topic` (`@NotBlank`).
+     - `ReadingPassageResponse`: `UUID id`, `String title`, `String body`, `String level`, `String topic`, `int wordCount`, `Instant createdAt`.
+     - `ContentMapper`: Static utility converting `ReadingPassage` to `ReadingPassageResponse`. Automatically computes `wordCount = body.trim().split("\\s+").length`.
+  2. **`modules/content/ports/IContentService.java`**:
+     - `Page<ReadingPassageResponse> getPassages(String level, String topic, Pageable pageable);`
+     - `ReadingPassageResponse getPassageById(UUID id);`
+     - `ReadingPassageResponse createPassage(CreatePassageRequest request);`
+  3. **`modules/content/services/impl/ContentServiceImpl.java`**:
+     - `getPassages`: Dynamically queries `ReadingPassageRepository` based on whether `level` and `topic` filters are provided.
+     - `getPassageById`: Queries by ID; throws `ResourceNotFoundException("Passage not found with ID: " + id)` if missing.
+     - `createPassage`: Calculates word count, maps to entity, saves, and returns response.
+  4. **`modules/content/controllers/ContentController.java`**:
+     - Endpoints:
+       - `GET /api/content/passages?level=B2&topic=Technology&page=0&size=10` -> HTTP 200 with paginated passage summaries.
+       - `GET /api/content/passages/{id}` -> HTTP 200 with full passage body.
+       - `POST /api/content/passages` -> HTTP 201 with created passage.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/content/ContentServiceTest.java`:
+    - Test `getPassageById_NotFound_Throws404()`.
+    - Test `createPassage_ComputesWordCountAccurately()`.
+  - Controller Tests in `src/test/java/com/ieltsplatform/modules/content/ContentControllerTest.java`:
+    - `MockMvc` verifying `GET /api/content/passages` returns status 200 and JSON array.
+  - Verification Command: `mvn test -Dtest=ContentServiceTest,ContentControllerTest` (Must pass with 0 errors).
 
 ---
 
-## **6. Appendix: Why We Need Database Migrations (Flyway)**
+## 🟢 WEEK 3: User Profile Security & Reading Question Modeling
 
-### **What is a Database Migration Tool?**
-A database migration tool (like **Flyway**) is a version-control system for your relational database schema. Instead of executing manual SQL scripts or relying on JPA Hibernate auto-ddl (`spring.jpa.hibernate.ddl-auto=update`), Flyway executes versioned SQL files (e.g., `V1__init_users.sql`, `V2__init_content.sql`) sequentially against your database and keeps a ledger table (`flyway_schema_history`) tracking which scripts have been applied.
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Activate Spring Security JWT filter, secure user profile endpoints (`GET /api/users/me`, `PATCH /api/users/me`), and enforce RBAC.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`common/security/JwtAuthFilter.java`**:
+     - Extends `OncePerRequestFilter`. Extracts header `Authorization: Bearer <token>`.
+     - Validates token via `JwtTokenProvider`. Extracts `userId` and `roles`.
+     - Builds `UsernamePasswordAuthenticationToken` with principal `UserPrincipal(userId, email, roles)` and sets into `SecurityContextHolder`.
+  2. **`common/config/SecurityConfig.java` (Hardened)**:
+     - Register `JwtAuthFilter` before `UsernamePasswordAuthenticationFilter`.
+     - Rules:
+       - Permit: `/api/auth/**`, `GET /api/content/**`, `/swagger-ui/**`, `/v3/api-docs/**`.
+       - Require Authentication: `/api/users/**`, `/api/assessment/**`, `/api/writing/**`, `/api/flashcards/**`, `/api/dictation/**`.
+  3. **`modules/user/dtos/` & `UserMapper.java`**:
+     - `UpdateProfileRequest`: `String name`, `Double targetBandScore`, `String avatarUrl`.
+     - `UserProfileResponse`: `UUID id`, `String email`, `String name`, `UserRole role`, `Double targetBandScore`, `String avatarUrl`, `Instant createdAt`.
+  4. **`modules/user/ports/IUserService.java` & `UserServiceImpl.java`**:
+     - `UserProfileResponse getProfile(UUID userId)`: Fetches user; throws 404 if missing; returns DTO (never exposes password hash).
+     - `UserProfileResponse updateProfile(UUID userId, UpdateProfileRequest req)`: Updates mutable fields; saves and returns updated DTO.
+  5. **`modules/user/controllers/UserController.java`**:
+     - `@RestController @RequestMapping("/api/users")`:
+       - `GET /api/users/me`: Reads authenticated `userId` from security context; returns `UserProfileResponse`.
+       - `PATCH /api/users/me`: Validates request; updates and returns `UserProfileResponse`.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/user/UserControllerTest.java`:
+    - Test `GET /api/users/me` without Bearer token -> HTTP 403 / 401 Forbidden.
+    - Test `GET /api/users/me` with valid mock JWT -> HTTP 200 with user profile JSON.
+  - Verification Command: `mvn test -Dtest=UserControllerTest` (Must pass with 0 errors).
 
-### **Why Do Production Systems Need Migrations?**
-1. **Team Alignment & Sync:** When Developer A adds a new table or column, Developer B receives the SQL file via Git, and Flyway automatically updates Developer B's local database upon application startup.
-2. **Automated CI/CD & Deployments:** Production databases cannot be reset or re-created. Flyway applies delta updates safely during deployment pipelines without human intervention.
-3. **Audit Trail & Rollbacks:** Provides an exact audit log of who changed what database schema at what point in time.
-4. **Data Integrity:** Avoids destructive JPA auto-ddl behavior in production environments that could accidentally drop columns or tables.
+---
 
-*During the 4-week MVP development phase, tables are created via Spring Data JPA auto-generation (`ddl-auto: update`) to speed up iteration. Flyway migrations will be introduced as the project transitions toward production staging.*
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Model passage questions (MCQ, True/False/Not-Given), link them to reading passages, and create the initial IELTS data seeder.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/content/entities/QuestionType.java` & `PassageQuestion.java`**:
+     - `QuestionType` enum: `MULTIPLE_CHOICE`, `TRUE_FALSE_NOT_GIVEN`.
+     - `PassageQuestion` extends `BaseEntity`. `@Entity @Table(name = "passage_questions")`.
+     - Fields:
+       - `passage` (`@ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "passage_id", nullable = false) ReadingPassage passage;`),
+       - `questionNumber` (`@Column(nullable = false)`),
+       - `type` (`@Enumerated(EnumType.STRING) @Column(nullable = false)`),
+       - `prompt` (`@Column(columnDefinition = "TEXT", nullable = false)`),
+       - `optionsJson` (`@Column(columnDefinition = "TEXT")` - for MCQ options e.g. `{"A":"...", "B":"..."}`),
+       - `correctAnswer` (`@Column(nullable = false)` - e.g. "A", "TRUE", "NOT_GIVEN"),
+       - `explanation` (`@Column(columnDefinition = "TEXT")`).
+  2. **`modules/content/repository/PassageQuestionRepository.java`**:
+     - `List<PassageQuestion> findByPassageIdOrderByQuestionNumberAsc(UUID passageId);`
+  3. **`modules/content/dtos/`**:
+     - `PassageQuestionResponse`: `UUID id`, `int questionNumber`, `QuestionType type`, `String prompt`, `Map<String, String> options`, `String explanation` (omits `correctAnswer` during active test mode).
+  4. **`modules/content/seed/ContentDataSeeder.java`**:
+     - `@Component @Profile("dev")` implementing `CommandLineRunner`:
+     - Checks `if (readingPassageRepository.count() == 0)`.
+     - Inserts 5 realistic IELTS Reading Passages (B1, B2, C1) with 8–10 questions each (MCQ and TFNG).
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/content/PassageQuestionRepositoryTest.java`:
+    - Save passage with 3 questions; verify cascading fetch and order by `questionNumber`.
+  - Test `GET /api/content/passages/{id}/questions` returns question list.
+  - Verification Command: `mvn test -Dtest=PassageQuestionRepositoryTest` (Must pass with 0 errors).
+
+---
+
+## 🟡 WEEK 4: Scoring Strategy Engine & Flashcard Domain Foundation
+
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Implement the generic `IAnswerScorer` strategy engine and build shared cloud port contracts with deterministic local mocks (`ILlmClient`, `ITtsClient`, `IStorageClient`).
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`common/dtos/ScoreResult.java` & `common/ports/IAnswerScorer.java`**:
+     - `ScoreResult`: `boolean isCorrect`, `double score` (1.0 or 0.0), `String feedback`, `String normalizedAnswer`.
+     - `IAnswerScorer` interface:
+       - `ScoreResult score(PassageQuestion question, String userAnswer);`
+       - `QuestionType getSupportedType();`
+  2. **`common/services/impl/McqScorerImpl.java`**:
+     - Implements `IAnswerScorer` for `MULTIPLE_CHOICE`.
+     - Normalizes: `userAnswer.trim().toUpperCase()`.
+     - Checks if `normalized.equals(question.getCorrectAnswer().trim().toUpperCase())`.
+  3. **`common/services/impl/TfNgScorerImpl.java`**:
+     - Implements `IAnswerScorer` for `TRUE_FALSE_NOT_GIVEN`.
+     - Normalizes: maps "T" -> "TRUE", "F" -> "FALSE", "NG" -> "NOT_GIVEN".
+     - Compares normalized token against `question.getCorrectAnswer()`.
+  4. **`common/services/impl/AnswerScorerRegistry.java`**:
+     - `@Component`: Injects `List<IAnswerScorer> scorers`. Populates `Map<QuestionType, IAnswerScorer>`.
+     - Method `IAnswerScorer getScorer(QuestionType type)`: Returns corresponding scorer or throws `UnsupportedOperationException`.
+  5. **`common/ports/ILlmClient.java` & `MockLlmClientImpl.java`**:
+     - Interface: `String generate(String prompt);`
+     - `MockLlmClientImpl` (`@Service @Profile("dev")`): Returns deterministic JSON outputs for essay evaluations and dictionary word definitions without making internet calls.
+  6. **`common/ports/ITtsClient.java` & `IStorageClient.java`**:
+     - Define `ITtsClient` (`byte[] synthesize(String text)`) and `IStorageClient` (`String upload(String key, byte[] bytes)`). Provide mock implementations for local testing.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/common/AnswerScorerTest.java`:
+    - Test `McqScorerImpl` with correct, wrong, and whitespace-padded inputs.
+    - Test `TfNgScorerImpl` with abbreviations ("T", "NG") and casing.
+    - Test `AnswerScorerRegistry` correctly resolves strategies by `QuestionType`.
+  - Verification Command: `mvn test -Dtest=AnswerScorerTest` (Must pass with 0 errors).
+
+---
+
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Build the Flashcard domain entities, repository, and global `WordDefinition` caching entity.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/flashcard/entities/WordDefinition.java` & `WordDefinitionRepository.java`**:
+     - Extends `BaseEntity`. `@Entity @Table(name = "word_definitions")`.
+     - Fields:
+       - `word` (`@Column(unique = true, nullable = false)`),
+       - `lemma` (`@Column(nullable = false)`),
+       - `partOfSpeech` (String),
+       - `definition` (`@Column(columnDefinition = "TEXT", nullable = false)`),
+       - `exampleSentence` (`@Column(columnDefinition = "TEXT")`).
+     - Repo: `Optional<WordDefinition> findByLemma(String lemma);` and `Optional<WordDefinition> findByWordIgnoreCase(String word);`.
+  2. **`modules/flashcard/entities/SourceTag.java` & `Flashcard.java`**:
+     - `SourceTag` enum: `READING_PASSAGE`, `DICTATION`, `MANUAL`.
+     - `Flashcard` extends `BaseEntity`. `@Entity @Table(name = "flashcards")`.
+     - Fields:
+       - `userId` (`@Column(nullable = false)`),
+       - `word` (`@Column(nullable = false)`),
+       - `lemma` (`@Column(nullable = false)`),
+       - `definition` (`@Column(columnDefinition = "TEXT", nullable = false)`),
+       - `exampleSentence` (`@Column(columnDefinition = "TEXT")`),
+       - `sourceTag` (`@Enumerated(EnumType.STRING)`),
+       - `sourceEntityId` (UUID - optional link to passage or dictation ID),
+       - `masteryLevel` (int, default 0).
+  3. **`modules/flashcard/repository/FlashcardRepository.java`**:
+     - `Optional<Flashcard> findByUserIdAndLemma(UUID userId, String lemma);`
+     - `Page<Flashcard> findByUserId(UUID userId, Pageable pageable);`
+     - `long countByUserId(UUID userId);`
+  4. **`modules/flashcard/dtos/` & `FlashcardMapper.java`**:
+     - `AddFlashcardRequest`: `String word` (`@NotBlank`), `SourceTag sourceTag`, `UUID sourceEntityId`.
+     - `FlashcardResponse`: `UUID id`, `String word`, `String lemma`, `String definition`, `String exampleSentence`, `SourceTag sourceTag`, `int masteryLevel`, `Instant createdAt`.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/flashcard/FlashcardRepositoryTest.java`:
+    - Test saving a `WordDefinition` and verifying unique constraint on `word`.
+    - Test saving a `Flashcard` and querying by `findByUserIdAndLemma()`.
+  - Verification Command: `mvn test -Dtest=FlashcardRepositoryTest` (Must pass with 0 errors).
+
+---
+
+## 🟡 WEEK 5: Mock Exam Assessment Lifecycle & SM-2 Algorithm
+
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Implement the IELTS Mock Exam attempt lifecycle (`TestAttempt`), answer saving, and server-side timer enforcement.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/assessment/entities/AttemptStatus.java`, `TestAttempt.java`, `TestAnswer.java`**:
+     - `AttemptStatus` enum: `IN_PROGRESS`, `COMPLETED`, `EXPIRED`.
+     - `TestAttempt` extends `BaseEntity`. `@Entity @Table(name = "test_attempts")`:
+       - `userId` (UUID, nullable=false),
+       - `passageId` (UUID, nullable=false),
+       - `startedAt` (Instant, nullable=false),
+       - `submittedAt` (Instant),
+       - `timeLimitMinutes` (int, default 20),
+       - `bandScore` (Double),
+       - `status` (`@Enumerated(EnumType.STRING)`).
+     - `TestAnswer` extends `BaseEntity`. `@Entity @Table(name = "test_answers")`:
+       - `attempt` (`@ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "attempt_id") TestAttempt attempt;`),
+       - `questionId` (UUID, nullable=false),
+       - `userAnswer` (String),
+       - `isCorrect` (Boolean),
+       - `score` (Double).
+  2. **`modules/assessment/repository/TestAttemptRepository.java` & `TestAnswerRepository.java`**:
+     - `Optional<TestAttempt> findByIdAndUserId(UUID id, UUID userId);`
+     - `List<TestAnswer> findByAttemptId(UUID attemptId);`
+     - `Optional<TestAnswer> findByAttemptIdAndQuestionId(UUID attemptId, UUID questionId);`
+  3. **`modules/assessment/ports/IAssessmentService.java` & `AssessmentServiceImpl.java` (Part 1)**:
+     - `TestAttemptResponse startAttempt(UUID userId, UUID passageId)`:
+       - Verifies passage exists. Creates `TestAttempt` with `startedAt = Instant.now()`, `status = IN_PROGRESS`.
+     - `void saveAnswer(UUID userId, UUID attemptId, UUID questionId, String answer)`:
+       - Validates attempt belongs to `userId` and `status == IN_PROGRESS`.
+       - Enforces server-side timer: `Duration.between(attempt.getStartedAt(), Instant.now()).toMinutes() <= attempt.getTimeLimitMinutes()`. If expired, marks `status = EXPIRED` and throws `BadRequestException("Exam time limit exceeded")`.
+       - Upserts `TestAnswer`.
+  4. **`modules/assessment/controllers/AssessmentController.java`**:
+     - `POST /api/assessment/attempts` (Body: `{ "passageId": "..." }`) -> HTTP 201.
+     - `PUT /api/assessment/attempts/{id}/answers` (Body: `{ "questionId": "...", "answer": "B" }`) -> HTTP 200.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/assessment/AssessmentServiceAttemptTest.java`:
+    - Test `startAttempt()` creates session with active timer.
+    - Test `saveAnswer()` rejects submissions when elapsed time > time limit (HTTP 400).
+    - Test upserting answers updates existing answer instead of duplicating rows.
+  - Verification Command: `mvn test -Dtest=AssessmentServiceAttemptTest` (Must pass with 0 errors).
+
+---
+
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Implement the mathematical SuperMemo SM-2 Spaced Repetition scheduler algorithm with full unit test coverage.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/flashcard/entities/FlashcardReview.java` & `FlashcardReviewRepository.java`**:
+     - Extends `BaseEntity`. `@Entity @Table(name = "flashcard_reviews")`.
+     - Fields:
+       - `flashcard` (`@OneToOne @JoinColumn(name = "flashcard_id", unique = true) Flashcard flashcard;`),
+       - `nextReviewAt` (Instant, nullable=false),
+       - `intervalDays` (int, default 1),
+       - `easeFactor` (double, default 2.5),
+       - `repetitions` (int, default 0),
+       - `lastReviewedAt` (Instant).
+     - Repo: `List<FlashcardReview> findByFlashcard_UserIdAndNextReviewAtBefore(UUID userId, Instant date);`.
+  2. **`modules/flashcard/dtos/ReviewSchedule.java`**:
+     - Record `ReviewSchedule(int nextIntervalDays, double nextEaseFactor, int nextRepetitions, Instant nextReviewAt)`.
+  3. **`modules/flashcard/ports/ISpacedRepetitionScheduler.java` & `Sm2SchedulerImpl.java`**:
+     - Pure mathematical SM-2 implementation:
+       ```java
+       public ReviewSchedule computeNext(FlashcardReview current, int quality) {
+           // quality: 0 to 5
+           if (quality < 3) {
+               // Failed recall: reset repetitions to 0, review tomorrow
+               return new ReviewSchedule(1, current.getEaseFactor(), 0, Instant.now().plus(1, ChronoUnit.DAYS));
+           }
+           int reps = current.getRepetitions() + 1;
+           int interval;
+           if (reps == 1) interval = 1;
+           else if (reps == 2) interval = 6;
+           else interval = (int) Math.round(current.getIntervalDays() * current.getEaseFactor());
+
+           double newEase = current.getEaseFactor() + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
+           if (newEase < 1.3) newEase = 1.3; // SM-2 absolute minimum ease factor
+
+           return new ReviewSchedule(interval, newEase, reps, Instant.now().plus(interval, ChronoUnit.DAYS));
+       }
+       ```
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/flashcard/Sm2SchedulerTest.java` (Pure JUnit 5):
+    - Test recall quality = 5 increases ease factor and scales interval (1 -> 6 -> 15 days).
+    - Test recall quality < 3 resets repetitions to 0 and interval to 1 day.
+    - Test ease factor never drops below 1.3 even after consecutive failures.
+  - Verification Command: `mvn test -Dtest=Sm2SchedulerTest` (Must pass with 0 errors).
+
+---
+
+## 🟡 WEEK 6: Assessment Automated Grading & Flashcard Review Loop
+
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Implement exam completion, automated grading via `AnswerScorerRegistry`, and conversion to official IELTS Band Scores (0.0–9.0).
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/assessment/services/impl/IeltsBandScoreConverter.java`**:
+     - Utility converting raw Reading score (out of 40 or percentage) to IELTS 9-band scale:
+       - >= 88% -> Band 8.5–9.0
+       - >= 75% -> Band 7.5–8.0
+       - >= 62% -> Band 6.5–7.0
+       - >= 50% -> Band 5.5–6.0
+       - Below 50% -> Band 4.0–5.0
+  2. **`modules/assessment/services/impl/AssessmentServiceImpl.java` (Part 2 - Grading)**:
+     - `AssessmentResultResponse submitAttempt(UUID userId, UUID attemptId)`:
+       - Validates attempt; loads all `PassageQuestion` records for the passage.
+       - Iterates questions: retrieves user's `TestAnswer`; fetches appropriate `IAnswerScorer` from `AnswerScorerRegistry` by `question.getType()`; computes `ScoreResult`.
+       - Updates `TestAnswer`: `isCorrect = scoreResult.isCorrect()`, `score = scoreResult.getScore()`.
+       - Computes total correct count, calculates IELTS Band Score via `IeltsBandScoreConverter`.
+       - Marks `attempt.setStatus(AttemptStatus.COMPLETED)` and `attempt.setSubmittedAt(Instant.now())`.
+  3. **`modules/assessment/dtos/`**:
+     - `AssessmentResultResponse`: `UUID attemptId`, `double bandScore`, `int correctCount`, `int totalQuestions`, `int timeSpentSeconds`, `List<QuestionFeedbackDto> questions`.
+  4. **`modules/assessment/controllers/AssessmentController.java` (Finalization)**:
+     - `POST /api/assessment/attempts/{id}/submit`: Triggers grading; returns `AssessmentResultResponse`.
+     - `GET /api/assessment/attempts/{id}/result`: Retrieves result breakdown for review.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/assessment/AssessmentGradingTest.java`:
+    - Full end-to-end exam grading test with MockMvc.
+    - Test scoring a mix of MCQ and TFNG answers -> accurately computes Band Score.
+  - Verification Command: `mvn test -Dtest=AssessmentGradingTest` (Must pass with 0 errors).
+
+---
+
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Implement the complete Flashcard service (add word with lemma normalization, definition caching, and daily review workflow).
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/flashcard/ports/IFlashcardService.java`**:
+     - `FlashcardResponse addWord(UUID userId, AddFlashcardRequest request);`
+     - `List<FlashcardReviewResponse> getDueReviews(UUID userId);`
+     - `FlashcardResponse reviewCard(UUID userId, UUID cardId, int qualityScore);`
+  2. **`modules/flashcard/services/impl/FlashcardServiceImpl.java`**:
+     - `addWord()`:
+       - Normalizes word (lowercases, trims, basic lemmatization).
+       - Checks `flashcardRepository.findByUserIdAndLemma(userId, lemma)` (throws `DuplicateResourceException` if card already in user deck).
+       - Checks `wordDefinitionRepository.findByLemma(lemma)`:
+         - If found: reuses definition & example sentence.
+         - If missing: calls Person A's `ILlmClient` mock to generate definition; saves to `WordDefinition` table.
+       - Saves `Flashcard` + initial `FlashcardReview` (`nextReviewAt = now`).
+     - `getDueReviews()`: Queries `flashcardReviewRepository.findByFlashcard_UserIdAndNextReviewAtBefore(userId, Instant.now())`.
+     - `reviewCard()`: Injects `ISpacedRepetitionScheduler`; computes next schedule; updates `FlashcardReview`; increments `masteryLevel` if quality >= 4.
+  3. **`modules/flashcard/controllers/FlashcardController.java`**:
+     - `POST /api/flashcards`: Add new word.
+     - `GET /api/flashcards/due`: List cards due for review today.
+     - `POST /api/flashcards/{id}/review` (Body: `{ "quality": 4 }`): Submit review score.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/flashcard/FlashcardServiceTest.java`:
+    - Test duplicate word prevention per user.
+    - Test dictionary cache reuse (verifies LLM client is NOT called if word is already in `word_definitions`).
+    - Test `reviewCard()` correctly updates `nextReviewAt`.
+  - Verification Command: `mvn test -Dtest=FlashcardServiceTest` (Must pass with 0 errors).
+
+---
+
+## 🟠 PHASE 3: AI Writing Evaluation, Dictation Practice & Hardening (Weeks 7–9)
+
+## 🟠 WEEK 7: AI Writing Pipeline Architecture & Dictation Audio Model
+
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Build the decoupled AI writing submission architecture, entities, structured prompt template, and local scoring mock.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/writing/entities/EssaySubmission.java` & `EssayFeedback.java`**:
+     - `EssaySubmission` extends `BaseEntity`. `@Entity @Table(name = "essay_submissions")`:
+       - `userId` (UUID, nullable=false),
+       - `taskType` (`TASK_1` or `TASK_2`),
+       - `prompt` (`@Column(columnDefinition = "TEXT", nullable = false)`),
+       - `essayText` (`@Column(columnDefinition = "TEXT", nullable = false)`),
+       - `wordCount` (int, nullable=false),
+       - `overallBand` (Double),
+       - `submittedAt` (Instant).
+     - `EssayFeedback` extends `BaseEntity`. `@Entity @Table(name = "essay_feedbacks")`:
+       - `submission` (`@ManyToOne @JoinColumn(name = "submission_id") EssaySubmission submission;`),
+       - `criterion` (`TASK_ACHIEVEMENT`, `COHERENCE_COHESION`, `LEXICAL_RESOURCE`, `GRAMMATICAL_ACCURACY`),
+       - `score` (Double),
+       - `feedback` (`@Column(columnDefinition = "TEXT")`),
+       - `suggestionsJson` (`@Column(columnDefinition = "TEXT")`).
+  2. **`modules/writing/ports/IEssayScorer.java` & `MockEssayScorerImpl.java`**:
+     - `IEssayScorer` interface: `EssayScoringResult score(String prompt, String essay, TaskType taskType);`.
+     - `MockEssayScorerImpl` (`@Service @Profile("dev")`): Calculates rubric scores based on word count heuristics (e.g. >= 250 words -> base 6.5) and returns mock sentence-level suggestions without hitting external APIs.
+  3. **`modules/writing/prompt/LlmPromptTemplate.java`**:
+     - Encapsulates IELTS official rubric guidelines and enforces strict JSON response schema:
+       ```json
+       {
+         "overallBand": 7.0,
+         "criteria": [
+           { "criterion": "TASK_ACHIEVEMENT", "score": 7.0, "feedback": "..." },
+           { "criterion": "COHERENCE_COHESION", "score": 6.5, "feedback": "..." },
+           { "criterion": "LEXICAL_RESOURCE", "score": 7.0, "feedback": "..." },
+           { "criterion": "GRAMMATICAL_ACCURACY", "score": 7.5, "feedback": "..." }
+         ],
+         "inlineSuggestions": [{ "originalSentence": "...", "improvedSentence": "...", "explanation": "..." }]
+       }
+       ```
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/writing/MockEssayScorerTest.java`:
+    - Test that `MockEssayScorerImpl` returns complete evaluation for Task 1 and Task 2.
+    - Test Jackson parsing of `LlmPromptTemplate` JSON schema.
+  - Verification Command: `mvn test -Dtest=MockEssayScorerTest` (Must pass with 0 errors).
+
+---
+
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Model `AudioContent` reusable embeddable, create `DictationItem` data model, and write dictation repository queries.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`common/base/AudioContent.java`**:
+     - `@Embeddable` class:
+       - `audioUrl` (`@Column(name = "audio_url", nullable = false)`),
+       - `transcript` (`@Column(name = "transcript", columnDefinition = "TEXT", nullable = false)`),
+       - `durationSeconds` (`@Column(name = "duration_seconds", nullable = false)`),
+       - `accent` (`@Column(length = 20)` - e.g. "BRITISH", "AMERICAN", "AUSTRALIAN").
+  2. **`modules/dictation/entities/DictationItem.java` & `DictationAttempt.java`**:
+     - `DictationItem` extends `BaseEntity`. `@Entity @Table(name = "dictation_items")`:
+       - `title` (`@Column(nullable = false)`),
+       - `cefrLevel` (`@Column(length = 10, nullable = false)`),
+       - `topic` (`@Column(length = 50)`),
+       - `@Embedded private AudioContent audio;`.
+     - `DictationAttempt` extends `BaseEntity`. `@Entity @Table(name = "dictation_attempts")`:
+       - `userId` (UUID, nullable=false),
+       - `dictationItem` (`@ManyToOne @JoinColumn(name = "item_id") DictationItem dictationItem;`),
+       - `userInput` (`@Column(columnDefinition = "TEXT", nullable = false)`),
+       - `accuracyPercentage` (Double),
+       - `correctWordsCount` (int),
+       - `totalWordsCount` (int).
+  3. **`modules/dictation/repository/DictationItemRepository.java`**:
+     - `List<DictationItem> findByCefrLevel(String level);`
+     - `Page<DictationItem> findByTopic(String topic, Pageable pageable);`
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/dictation/DictationRepositoryTest.java`:
+    - Test saving `DictationItem` with embedded `AudioContent` and retrieving by `cefrLevel`.
+  - Verification Command: `mvn test -Dtest=DictationRepositoryTest` (Must pass with 0 errors).
+
+---
+
+## 🟠 WEEK 8: Gemini AI Writing Scorer & Dictation Levenshtein Diff Engine
+
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Implement production Gemini AI essay rubric scoring (`LlmEssayScorerImpl`), word count validation, and writing controllers.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/writing/services/impl/LlmEssayScorerImpl.java`**:
+     - `@Service @Profile("prod")` implementing `IEssayScorer`:
+     - Combines prompt + user essay into `LlmPromptTemplate`.
+     - Calls Person A's `ILlmClient.generate()`.
+     - Parses returned JSON using `ObjectMapper` into `EssayScoringResult`. Throws `DomainException` if parsing fails.
+  2. **`modules/writing/ports/IWritingService.java` & `WritingServiceImpl.java`**:
+     - `EssaySubmissionResponse submitEssay(UUID userId, SubmitEssayRequest req)`:
+       - Counts words (`text.trim().split("\\s+").length`).
+       - Enforces word count thresholds: Task 1 minimum 150 words, Task 2 minimum 250 words (throws `BadRequestException` if below threshold).
+       - Saves initial `EssaySubmission`.
+       - Calls injected `IEssayScorer` (decoupled from mock vs prod).
+       - Persists 4 `EssayFeedback` records and overall band score onto `EssaySubmission`.
+     - `EssaySubmissionResponse getSubmission(UUID userId, UUID submissionId)`.
+     - `Page<EssaySubmissionResponse> getUserSubmissions(UUID userId, Pageable pageable)`.
+  3. **`modules/writing/controllers/WritingController.java`**:
+     - `POST /api/writing/submissions` -> HTTP 201 with score and feedback breakdown.
+     - `GET /api/writing/submissions/{id}` -> HTTP 200 with details.
+     - `GET /api/writing/submissions/my` -> HTTP 200 with history.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/writing/WritingServiceTest.java`:
+    - Test word count rejection (< 150 words -> HTTP 400).
+    - Test saving essay and persisting 4 criteria feedback records.
+  - Controller Tests in `src/test/java/com/ieltsplatform/modules/writing/WritingControllerTest.java` (MockMvc).
+  - Verification Command: `mvn test -Dtest=WritingServiceTest,WritingControllerTest` (Must pass with 0 errors).
+
+---
+
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Build the word-level Levenshtein diff comparison engine and complete the dictation submission and scoring service.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`modules/dictation/dtos/WordDiffDto.java` & `DiffStatus.java`**:
+     - `DiffStatus` enum: `CORRECT`, `TYPO`, `MISSING`, `EXTRA`.
+     - `WordDiffDto`: `String expectedWord`, `String actualWord`, `DiffStatus status`, `int editDistance`.
+     - `DictationResultResponse`: `double accuracyPercentage`, `int correctWords`, `int totalWords`, `List<WordDiffDto> diffBreakdown`.
+  2. **`modules/dictation/ports/IDictationScorer.java` & `LevenshteinDictationScorerImpl.java`**:
+     - Word-level scoring algorithm:
+       - Strips punctuation and normalizes casing from both strings.
+       - Computes token alignment between `transcriptTokens` and `userInputTokens`.
+       - For matching positions:
+         - If `distance == 0` -> `CORRECT`.
+         - If `distance <= 2` -> `TYPO` (minor spelling error).
+         - If word omitted -> `MISSING`.
+         - If extraneous word entered -> `EXTRA`.
+       - Computes `accuracy = (correctTokens / totalExpectedTokens) * 100`.
+  3. **`modules/dictation/ports/IDictationService.java` & `DictationServiceImpl.java`**:
+     - `DictationResultResponse submitDictation(UUID userId, UUID itemId, String userInput)`:
+       - Loads `DictationItem`; invokes `LevenshteinDictationScorerImpl`; saves `DictationAttempt`; returns diff breakdown.
+  4. **`modules/dictation/controllers/DictationController.java`**:
+     - `GET /api/dictation/items?level=B2` -> HTTP 200 list of exercises.
+     - `GET /api/dictation/items/{id}` -> HTTP 200 details (audio URL, duration, difficulty).
+     - `POST /api/dictation/items/{id}/submit` -> HTTP 200 with accuracy and word diff list.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `src/test/java/com/ieltsplatform/modules/dictation/LevenshteinDictationScorerTest.java`:
+    - Test exact match -> 100% accuracy.
+    - Test single letter typo (e.g. "enviroment" vs "environment") -> flagged as `TYPO`.
+    - Test omitted word -> flagged as `MISSING`.
+  - Controller Tests in `src/test/java/com/ieltsplatform/modules/dictation/DictationControllerTest.java` (MockMvc).
+  - Verification Command: `mvn test -Dtest=LevenshteinDictationScorerTest,DictationControllerTest` (Must pass with 0 errors).
+
+---
+
+## 🟠 WEEK 9: Cross-Feature Linking, OpenAPI Docs & Backend Hardening
+
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Polish OpenAPI Swagger UI with Bearer auth, implement Redis rate limiting, and write the full backend regression suite.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`common/config/OpenApiConfig.java`**:
+     - Configures Swagger 3 specification with Bearer JWT SecurityScheme (`type = SecuritySchemeType.HTTP, scheme = "bearer", bearerFormat = "JWT"`).
+     - Documents tags: `Auth`, `Users`, `Reading Content`, `Assessment`, `Writing AI`, `Flashcards`, `Dictation`.
+  2. **`common/security/RateLimitFilter.java`**:
+     - Redis-backed token bucket rate limiter:
+       - Restricts `POST /api/auth/login` to 10 requests / min per IP.
+       - Restricts `POST /api/writing/submissions` to 5 requests / min per user.
+       - Returns HTTP 429 (`Too Many Requests`) with `Retry-After` header when limit exceeded.
+  3. **Full System Integration Test Suite (`IeltsBackendIntegrationTest.java`)**:
+     - Full automated journey test:
+       - 1. Signup user -> Login -> Receive JWT.
+       - 2. Start Reading Assessment -> Save answers -> Submit exam -> Assert Band Score calculated.
+       - 3. Submit Writing Essay -> Assert 4 criteria returned.
+* **✅ Expected Results & Automated Test Gate:**
+  - Verify Swagger UI is interactive at `http://localhost:8080/swagger-ui.html`.
+  - Execute full test suite: `mvn clean test`.
+  - All tests across all modules pass with 100% success rate.
+
+---
+
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Implement cross-feature word extraction into Flashcards (from Reading & Dictation) and seed realistic dictation exercises.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **Cross-Feature Word Extraction Endpoints**:
+     - In `modules/content/controllers/ContentController.java`:
+       - `POST /api/content/passages/{id}/flashcards` (Body: `{ "word": "sustainable" }`):
+       - Calls `flashcardService.addWord(userId, word, SourceTag.READING_PASSAGE, passageId)`.
+     - In `modules/dictation/controllers/DictationController.java`:
+       - `POST /api/dictation/items/{id}/flashcards` (Body: `{ "word": "fluctuation" }`):
+       - Calls `flashcardService.addWord(userId, word, SourceTag.DICTATION, itemId)`.
+  2. **`modules/dictation/seed/DictationDataSeeder.java`**:
+     - Seed 5 real IELTS audio dictation exercises across levels B1, B2, and C1.
+     - Configures clean MP3 sample audio URLs and verified reference transcripts.
+  3. **`src/test/java/com/ieltsplatform/modules/flashcard/FlashcardIntegrationTest.java`**:
+     - Test adding word from Reading passage -> verify card appears in `GET /api/flashcards` with `sourceTag == READING_PASSAGE`.
+     - Test reviewing card -> verify `nextReviewAt` is scheduled.
+* **✅ Expected Results & Automated Test Gate:**
+  - Automated Tests in `FlashcardIntegrationTest.java` pass cleanly.
+  - End-to-end verification: Dictate audio -> extract mistaken word to flashcard -> card stored with definition.
+  - Verification Command: `mvn test -Dtest=FlashcardIntegrationTest` (Must pass with 0 errors).
+
+---
+
+# 🔵 PHASE 4: Vertical Frontend Implementation (Weeks 10–12)
+
+---
+
+## 🔵 WEEK 10: Architectural Sync, Shared Foundation & Core Catalogs
+
+### 🧑‍💻 Person A & Person B (Joint Kickoff - Days 1 to 3)
+* **🎯 Joint Goal:** Establish frontend architectural rules, standardize design tokens, install shadcn/ui primitives, and set up shared layout.
+* **🛠️ What Needs to Be Done (Days 1–3):**
+  1. **Day 1: Architecture Sync & Component Breakdown**:
+     - Agree on directory layout: `src/app/`, `src/components/ui/`, `src/components/shared/`, `src/lib/api/`, `src/hooks/`.
+     - Establish shared primitives: `Button`, `Input`, `Dialog/Modal`, `TimerBadge`, `AudioPlayer`, `CardContainer`.
+     - Define TypeScript types mapped 1:1 to backend DTOs.
+  2. **Days 2–3: Next.js 16 Setup & Global Auth Context**:
+     - Initialize Next.js 16 with TypeScript, Tailwind CSS v4, and shadcn/ui.
+     - Set up Axios / TanStack Query client with JWT bearer interceptor and token refresh handling.
+     - Build Root Layout, Navigation Header with auth state indicator, and Theme Provider.
+
+---
+
+### 🧑‍💻 Person A (Fresher - Days 4 & 5)
+* **🎯 Weekly Goal:** Build Auth UI (Login Modal, Signup Form with validation, and User Profile dropdown).
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`src/components/auth/LoginModal.tsx` & `SignupModal.tsx`**:
+     - Form validated with React Hook Form + Zod schema matching backend constraints.
+     - Submits to `POST /api/auth/login` and `POST /api/auth/signup`.
+     - Stores tokens in `localStorage` / HTTP-only cookies; updates `AuthContext`.
+  2. **`src/components/layout/UserNav.tsx` & `src/app/profile/page.tsx`**:
+     - User avatar dropdown with Logout trigger.
+     - Profile page allowing user to update Name, Target Band Score (e.g. 7.5), and view member status.
+* **✅ Expected Results:**
+  - User can open browser to `http://localhost:3000`, click "Sign In", authenticate, and see their profile avatar in the navigation bar.
+
+---
+
+### 🧑‍💻 Person B (Intern - Days 4 & 5)
+* **🎯 Weekly Goal:** Build the Reading Content Explorer page with level filtering and the responsive passage reader view.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`src/app/reading/page.tsx`**:
+     - Catalog grid showing Reading Passage cards (Title, Topic badge, CEFR level badge, word count estimate).
+     - Filter pill bar: `All`, `B1 (Intermediate)`, `B2 (Upper-Intermediate)`, `C1 (Advanced)`.
+     - Connects via TanStack Query to `GET /api/content/passages`.
+  2. **`src/app/reading/[id]/page.tsx`**:
+     - Clean typography passage reader view with adjustable font size.
+     - Text selection hook: highlighting any word triggers a popover menu ("Add to Flashcards").
+* **✅ Expected Results:**
+  - User can browse all reading passages, filter by CEFR level, click a passage to read, and highlight text with interactive tooltip.
+
+---
+
+## 🔵 WEEK 11: Mock Exam Interface & Spaced Repetition UI
+
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Build the authentic IELTS Reading Mock Exam arena with split-pane view, countdown timer, auto-submit, and Band Score dashboard.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`src/app/assessment/[passageId]/page.tsx`**:
+     - Split-pane layout: Reading passage on the left (scrollable), Question sheet on the right (independent scroll).
+     - Floating Countdown Timer bar: Displays remaining minutes/seconds; turns amber at 5 min, flashing red at 1 min.
+     - Radio group component for Multiple Choice questions; 3-way toggle for True / False / Not Given.
+     - Auto-save on click: Triggers `PUT /api/assessment/attempts/{id}/answers` in the background.
+     - Auto-submit trigger when timer hits `00:00`.
+  2. **`src/app/assessment/results/[attemptId]/page.tsx`**:
+     - Band Score display badge (e.g. "Band 7.5 - Good User").
+     - Summary metrics: Accuracy %, correct count / total questions, total time spent.
+     - Question review accordion: Displays correct answer vs user answer and official explanation.
+* **✅ Expected Results:**
+  - User can start a timed IELTS exam, answer questions under exam pressure, auto-submit upon timer completion, and view their official band score report.
+
+---
+
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Build the Flashcards Deck management page and interactive 3D Flip Card review arena with SM-2 quality rating buttons.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`src/app/flashcards/page.tsx`**:
+     - Overview banner: "Cards Due Today" counter, Total deck size, Mastered count.
+     - Vocabulary table with search filter and SourceTag pill badges (`Reading`, `Dictation`, `Manual`).
+     - "Quick Add Word" dialog modal submitting to `POST /api/flashcards`.
+  2. **`src/app/flashcards/review/page.tsx`**:
+     - 3D Flip Card animation:
+       - Front side: Target word, phonetics, audio pronunciation button.
+       - Back side (revealed on click/spacebar): Definition, part of speech, and highlighted example sentence.
+     - SM-2 Rating Bar: 6 buttons (0="Blackout", 1="Wrong", 2="Struggled", 3="Passed", 4="Good", 5="Perfect").
+     - Keyboard shortcuts: Keys 0 through 5 submit review score to `POST /api/flashcards/{id}/review` and load next card.
+     - Review completed celebration screen when no more cards are due.
+* **✅ Expected Results:**
+  - User can browse their flashcards, click "Start Review", flip through due cards using keyboard or mouse, rate recall quality, and see the queue update in real time.
+
+---
+
+## 🔵 WEEK 12: AI Writing Feedback UI, Dictation Room & Final Polish
+
+### 🧑‍💻 Person A (Fresher)
+* **🎯 Weekly Goal:** Build the AI Writing submission editor with real-time word counter and the interactive 4-criteria IELTS feedback report card.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`src/app/writing/page.tsx`**:
+     - Task 1 & Task 2 selection tabs with official IELTS prompts.
+     - Distraction-free essay text editor.
+     - Live Word Counter: Displays word count dynamically; turns green when meeting threshold (>= 150 words for Task 1, >= 250 words for Task 2).
+     - "Analyze Essay with AI" submission button with loading spinner state.
+  2. **`src/app/writing/feedback/[id]/page.tsx`**:
+     - Overall Band Score circular progress card.
+     - 4-Criteria Radar Chart & Breakdown:
+       - Task Achievement score & commentary.
+       - Coherence & Cohesion score & commentary.
+       - Lexical Resource score & commentary.
+       - Grammatical Range & Accuracy score & commentary.
+     - Inline sentence improvements list: side-by-side comparison of user sentence vs improved native version.
+* **✅ Expected Results:**
+  - User can write an IELTS essay, see word counts update live, submit to Gemini AI, and inspect deep rubric feedback with actionable corrections.
+
+---
+
+### 🧑‍💻 Person B (Intern)
+* **🎯 Weekly Goal:** Build the interactive Dictation practice player with playback speed controls, real-time typing input, and visual mistake diff highlights.
+* **🛠️ What Needs to Be Done (Deep Technical Specification):**
+  1. **`src/app/dictation/[id]/page.tsx`**:
+     - Custom Audio Player: Play/Pause button, speed controls (0.8x, 1.0x, 1.2x), and instant 5-second rewind keyboard shortcut (Arrow Left).
+     - Clean typing input area with auto-focus and auto-scroll.
+     - "Check My Dictation" submit button triggering `POST /api/dictation/items/{id}/submit`.
+  2. **`src/components/dictation/DiffResults.tsx`**:
+     - Visual diff rendering:
+       - Correct words highlighted in Green.
+       - Misspelled words highlighted in Amber with hover tooltip showing expected spelling.
+       - Omitted words shown with Red strike-through.
+     - One-click "+" icon next to any mistake allowing instant addition to user's Flashcards deck.
+* **✅ Expected Results:**
+  - User can listen to dictation audio at custom speed, type what they hear, check results, see exact color-coded error highlights, and save misspelled words to flashcards in one click.
+
+---
+
+### 🧑‍💻 Person A & Person B (Joint Final Delivery - Week 12 Days 4 & 5)
+* **🎯 Final Milestone:**
+  1. **End-to-End User Journey Smoke Test:**
+     - User signs up -> browses reading passages -> takes timed mock exam -> receives Band 7.0 report.
+     - User reads passage -> selects unfamiliar word -> saves to flashcard -> reviews card with SM-2 flip animation.
+     - User writes Task 2 essay -> submits to Gemini AI -> receives 4-criteria feedback report.
+     - User completes dictation exercise -> reviews Levenshtein diff highlights -> saves misspelled word to deck.
+  2. **Production Build & Verification:**
+     - Frontend: `npm run build` succeeds with 0 linting or type errors.
+     - Backend: `mvn clean test` passes 100% of test cases.
+     - Deployable full-stack application ready for demo and release!

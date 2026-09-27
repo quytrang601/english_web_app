@@ -1,6 +1,14 @@
 spring:
   application:
     name: ielts-platform-backend
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
 
 server:
   port: 8080
